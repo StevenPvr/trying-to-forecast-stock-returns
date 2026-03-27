@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.coverage
+.claude/
+.pytest_cache/
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+.mcp.json
+
+core/data/

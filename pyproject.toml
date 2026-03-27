@@ -1,0 +1,33 @@
+[project]
+name = "prevision-sp500"
+version = "0.1.0"
+description = "Prevision du S&P 500 -- pipeline data, ML et backtesting"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+	"lxml>=5.2.0",
+	"matplotlib>=3.8.0",
+	"numpy>=1.26.0",
+	"pandas>=2.1.0",
+	"pyarrow>=14.0.0",
+	"requests>=2.31.0",
+	"yfinance>=0.2.36",
+	"fredapi>=0.5.0",
+	"python-dotenv>=1.0.0",
+	"xlrd>=2.0.1",
+	"openpyxl>=3.1.0",
+	"pytest>=9.0.2",
+	"ta>=0.11.0",
+	"numba>=0.61.0",
+	"catboost>=1.2.10",
+	"xgboost>=2.1.0",
+	"optuna>=4.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+	"pytest>=8.0",
+	"pandas-stubs>=2.0",
+	"types-requests>=2.31",
+	"types-pytz>=2024.1",
+]
