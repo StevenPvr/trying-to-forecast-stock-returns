@@ -11,6 +11,7 @@ import pandas as pd
 
 from core.src.meta_model.feature_selection.cache import FeatureSelectionRuntimeCache
 from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
+from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 _numba_spec = importlib.util.find_spec("numba")
@@ -110,6 +111,58 @@ def run_incremental_distance_correlation_pruning(
     return survivors, audit
 
 
+def run_target_distance_correlation_filter(
+    cache: FeatureSelectionRuntimeCache,
+    sfi_frame: pd.DataFrame,
+    feature_names: list[str],
+    config: FeatureSelectionConfig,
+) -> tuple[list[str], pd.DataFrame]:
+    ranked_features = _rank_features_by_sfi(sfi_frame, feature_names)
+    empty_audit = pd.DataFrame(
+        columns=[
+            "feature_name",
+            "target_distance_correlation",
+            "passes_target_correlation",
+            "drop_reason",
+        ],
+    )
+    if not ranked_features:
+        return [], empty_audit
+    train_frame = cache.build_feature_frame([])
+    target_values = _resolve_distance_input(cast(pd.Series, train_frame[MODEL_TARGET_COLUMN]))
+    worker_count = min(max(1, config.parallel_workers), len(ranked_features))
+    LOGGER.info(
+        "Feature selection target correlation filter started: candidates=%d | threshold=%.4f | workers=%d",
+        len(ranked_features),
+        config.target_distance_correlation_threshold,
+        worker_count,
+    )
+    rows = _score_target_distance_correlation_rows(
+        cache,
+        ranked_features,
+        target_values,
+        threshold=config.target_distance_correlation_threshold,
+    )
+    audit = pd.DataFrame(rows).sort_values(
+        ["passes_target_correlation", "target_distance_correlation", "feature_name"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    survivors = [
+        str(feature_name)
+        for feature_name in cast(
+            pd.Series,
+            audit.loc[cast(pd.Series, audit["passes_target_correlation"]).astype(bool), "feature_name"],
+        ).tolist()
+    ]
+    LOGGER.info(
+        "Feature selection target correlation filter completed: survivors=%d | dropped=%d | preview=%s",
+        len(survivors),
+        len(ranked_features) - len(survivors),
+        _build_feature_preview(survivors),
+    )
+    return survivors, audit
+
+
 def _extract_sfi_survivors(sfi_frame: pd.DataFrame) -> list[str]:
     passes_mask = cast(pd.Series, sfi_frame["passes_sfi"]).astype(bool)
     survivor_frame = cast(pd.DataFrame, sfi_frame.loc[passes_mask].copy())
@@ -126,6 +179,44 @@ def _rank_features_by_sfi(sfi_frame: pd.DataFrame, feature_names: list[str]) -> 
         ascending=[False, False, False, True],
     )
     return [str(feature_name) for feature_name in cast(pd.Series, sorted_frame["feature_name"]).tolist()]
+
+
+def _score_target_distance_correlation_rows(
+    cache: FeatureSelectionRuntimeCache,
+    feature_names: list[str],
+    target_values: np.ndarray,
+    *,
+    threshold: float,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for feature_name in feature_names:
+        rows.append(
+            _score_single_target_distance_correlation(
+                cache,
+                feature_name,
+                target_values,
+                threshold=threshold,
+            ),
+        )
+    return rows
+
+
+def _score_single_target_distance_correlation(
+    cache: FeatureSelectionRuntimeCache,
+    feature_name: str,
+    target_values: np.ndarray,
+    *,
+    threshold: float,
+) -> dict[str, object]:
+    feature_values = _resolve_distance_input_array(cache.get_feature_array(feature_name))
+    metric_value = _distance_correlation_numba_wrapper(feature_values, target_values)
+    passes_threshold = metric_value > threshold
+    return {
+        "feature_name": feature_name,
+        "target_distance_correlation": metric_value,
+        "passes_target_correlation": passes_threshold,
+        "drop_reason": "retained" if passes_threshold else "low_target_distance_correlation",
+    }
 
 
 def _run_pruning_stages(
@@ -447,6 +538,11 @@ def _build_distance_correlation_matrix(sampled_frame: pd.DataFrame) -> pd.DataFr
 
 def _resolve_distance_input(series: pd.Series) -> np.ndarray:
     values = series.to_numpy(dtype=np.float64, copy=True)
+    return _resolve_distance_input_array(values)
+
+
+def _resolve_distance_input_array(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64).copy()
     if not np.isfinite(values).all():
         finite_mask = np.isfinite(values)
         finite_values = values[finite_mask]
@@ -552,4 +648,5 @@ def _distance_correlation_numba_wrapper(left: np.ndarray, right: np.ndarray) -> 
 __all__ = [
     "run_incremental_distance_correlation_pruning",
     "run_incremental_linear_correlation_pruning",
+    "run_target_distance_correlation_filter",
 ]

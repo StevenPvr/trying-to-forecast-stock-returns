@@ -114,6 +114,7 @@ def _make_mock_selection_result() -> RobustFeatureSelectionResult:
         sfi_scores=score_frame,
         linear_pruning_audit=pd.DataFrame({"feature_name": ["feature_signal"]}),
         distance_correlation_audit=pd.DataFrame({"feature_name": ["feature_signal"]}),
+        target_correlation_audit=pd.DataFrame({"feature_name": ["feature_signal"]}),
         mda_group_scores=pd.DataFrame({"feature_family": ["other"], "feature_stem": ["feature_signal"]}),
         mda_final_scores=score_frame,
         summary={"selected_feature_count": 2},
@@ -176,6 +177,7 @@ class TestFeatureSelection:
         assert output_bundle.sfi_scores_parquet.exists()
         assert output_bundle.linear_pruning_audit_parquet.exists()
         assert output_bundle.distance_correlation_audit_parquet.exists()
+        assert output_bundle.target_correlation_audit_parquet.exists()
         assert output_bundle.mda_group_scores_parquet.exists()
         assert output_bundle.mda_final_scores_parquet.exists()
         assert {"feature_signal", "feature_duplicate"} <= set(filtered_dataset.columns)
@@ -212,6 +214,7 @@ class TestFeatureSelection:
             sfi_scores=pd.DataFrame(),
             linear_pruning_audit=pd.DataFrame(),
             distance_correlation_audit=pd.DataFrame(),
+            target_correlation_audit=pd.DataFrame(),
             mda_group_scores=pd.DataFrame(),
             mda_final_scores=pd.DataFrame(),
             summary={"selected_feature_count": 0},
@@ -276,6 +279,7 @@ class TestFeatureSelection:
             sfi_scores=pd.DataFrame(),
             linear_pruning_audit=pd.DataFrame(),
             distance_correlation_audit=pd.DataFrame(),
+            target_correlation_audit=pd.DataFrame(),
             mda_group_scores=pd.DataFrame(),
             mda_final_scores=pd.DataFrame(
                 {
@@ -305,6 +309,34 @@ class TestFeatureSelection:
         assert selected_frame["feature_name"].tolist() == ["feature_signal", "stock_open_price"]
         assert "stock_open_price" in filtered_dataset.columns
         assert "hl_context_stock_open_price" in filtered_dataset.columns
+
+    def test_run_feature_selection_uses_twenty_percent_of_train_rows_for_selection(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        dataset_path = tmp_path / "preprocessed.parquet"
+        _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
+        captured: dict[str, int] = {}
+
+        def _fake_run_robust_feature_selection(cache, folds, feature_names, config):
+            del folds, feature_names, config
+            captured["train_row_count"] = cache.train_row_count
+            return _make_mock_selection_result()
+
+        with patch(
+            "core.src.meta_model.feature_selection.main.run_robust_feature_selection",
+            side_effect=_fake_run_robust_feature_selection,
+        ):
+            run_feature_selection(
+                dataset_path,
+                FeatureSelectionConfig(
+                    fold_count=1,
+                    train_sampling_fraction=0.20,
+                    emit_input_inventory=False,
+                ),
+            )
+
+        assert captured["train_row_count"] == 12
 
 
 if __name__ == "__main__":

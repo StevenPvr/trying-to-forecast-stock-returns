@@ -25,6 +25,7 @@ from core.src.meta_model.feature_selection.io import (
     discover_selection_feature_columns,
     load_feature_selection_metadata,
     save_feature_selection_outputs,
+    subsample_train_feature_selection_metadata,
 )
 from core.src.meta_model.feature_selection.reporting import (
     validate_filtered_dataset_matches_selection,
@@ -94,6 +95,11 @@ def run_feature_selection(
         input_inventory.non_numeric_non_excluded_columns,
     )
     metadata = load_feature_selection_metadata(dataset_path)
+    metadata = subsample_train_feature_selection_metadata(
+        metadata,
+        train_sampling_fraction=selection_config.train_sampling_fraction,
+        minimum_unique_dates=selection_config.fold_count + LABEL_EMBARGO_DAYS + 1,
+    )
     feature_columns = discover_selection_feature_columns(dataset_path)
     if not feature_columns:
         raise ValueError("Feature selection found no numeric feature columns to score.")
@@ -141,6 +147,7 @@ def run_feature_selection(
         sfi_scores=selection_result.sfi_scores,
         linear_pruning_audit=selection_result.linear_pruning_audit,
         distance_correlation_audit=selection_result.distance_correlation_audit,
+        target_correlation_audit=selection_result.target_correlation_audit,
         mda_group_scores=selection_result.mda_group_scores,
         mda_final_scores=selection_result.mda_final_scores,
         summary=selection_result.summary,

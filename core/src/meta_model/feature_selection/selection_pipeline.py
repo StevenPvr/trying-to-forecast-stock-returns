@@ -12,6 +12,7 @@ from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
 from core.src.meta_model.feature_selection.correlation import (
     run_incremental_distance_correlation_pruning,
     run_incremental_linear_correlation_pruning,
+    run_target_distance_correlation_filter,
 )
 from core.src.meta_model.feature_selection.cv import SelectionFold
 from core.src.meta_model.feature_selection.grouping import build_feature_buckets
@@ -30,6 +31,7 @@ class RobustFeatureSelectionResult:
     sfi_scores: pd.DataFrame
     linear_pruning_audit: pd.DataFrame
     distance_correlation_audit: pd.DataFrame
+    target_correlation_audit: pd.DataFrame
     mda_group_scores: pd.DataFrame
     mda_final_scores: pd.DataFrame
     summary: dict[str, object]
@@ -66,7 +68,16 @@ def run_robust_feature_selection(
     _log_survivor_preview("distance pruning", distance_survivors)
     LOGGER.info("Feature selection stage timing | stage=distance_pruning | elapsed=%.2fs", time.perf_counter() - stage_start)
     stage_start = time.perf_counter()
-    mda_result = run_mda_selection(cache, folds, sfi_scores, distance_survivors, config)
+    target_survivors, target_audit = run_target_distance_correlation_filter(
+        cache,
+        sfi_scores,
+        distance_survivors,
+        config,
+    )
+    _log_survivor_preview("target correlation filter", target_survivors)
+    LOGGER.info("Feature selection stage timing | stage=target_correlation_filter | elapsed=%.2fs", time.perf_counter() - stage_start)
+    stage_start = time.perf_counter()
+    mda_result = run_mda_selection(cache, folds, sfi_scores, target_survivors, config)
     _log_mda_stage_summary(mda_result.final_scores, mda_result.selected_feature_names)
     LOGGER.info("Feature selection stage timing | stage=mda | elapsed=%.2fs", time.perf_counter() - stage_start)
     score_frame = build_feature_score_report(
@@ -74,6 +85,7 @@ def run_robust_feature_selection(
         sfi_scores,
         linear_survivors,
         distance_survivors,
+        target_survivors,
         mda_result,
     )
     summary = build_selection_summary(
@@ -81,6 +93,7 @@ def run_robust_feature_selection(
         sfi_scores,
         linear_survivors,
         distance_survivors,
+        target_survivors,
         mda_result.selected_feature_names,
         config,
     )
@@ -98,6 +111,7 @@ def run_robust_feature_selection(
         sfi_scores=sfi_scores,
         linear_pruning_audit=linear_audit,
         distance_correlation_audit=distance_audit,
+        target_correlation_audit=target_audit,
         mda_group_scores=mda_result.group_scores,
         mda_final_scores=mda_result.final_scores,
         summary=summary,
@@ -128,13 +142,16 @@ def build_feature_score_report(
     sfi_scores: pd.DataFrame,
     linear_survivors: list[str],
     distance_survivors: list[str],
+    target_survivors: list[str],
     mda_result: MdaSelectionResult,
 ) -> pd.DataFrame:
     score_frame = cast(pd.DataFrame, sfi_scores.copy())
     score_frame["selected_linear"] = cast(pd.Series, score_frame["feature_name"]).isin(linear_survivors)
     score_frame["selected_distance"] = cast(pd.Series, score_frame["feature_name"]).isin(distance_survivors)
+    score_frame["selected_target_correlation"] = cast(pd.Series, score_frame["feature_name"]).isin(target_survivors)
     mda_columns = [
         "feature_name",
+        "target_distance_correlation",
         "mda_mean_delta_objective",
         "mda_std_delta_objective",
         "mda_fold_positive_share",
@@ -150,8 +167,14 @@ def build_feature_score_report(
     score_frame["selected"] = cast(pd.Series, score_frame["selected"]).fillna(False).astype(bool)
     score_frame["selection_rank"] = cast(pd.Series, score_frame["selection_rank"]).fillna(0).astype(int)
     score_frame["drop_reason"] = cast(pd.Series, score_frame["drop_reason"]).fillna("rejected_before_mda").astype(str)
+    low_target_corr_mask = cast(pd.Series, score_frame["selected_distance"]).astype(bool) & ~cast(
+        pd.Series,
+        score_frame["selected_target_correlation"],
+    ).astype(bool)
+    score_frame.loc[low_target_corr_mask, "drop_reason"] = "low_target_distance_correlation"
     missing_mda_mask = ~cast(pd.Series, score_frame["feature_name"]).isin(list(cast(pd.Series, mda_result.final_scores["feature_name"]).astype(str)))
     score_frame.loc[missing_mda_mask, "drop_reason"] = "rejected_before_mda"
+    score_frame.loc[low_target_corr_mask, "drop_reason"] = "low_target_distance_correlation"
     return score_frame.sort_values(
         ["selected", "selection_rank", "objective_score", "feature_name"],
         ascending=[False, True, False, True],
@@ -163,6 +186,7 @@ def build_selection_summary(
     sfi_scores: pd.DataFrame,
     linear_survivors: list[str],
     distance_survivors: list[str],
+    target_survivors: list[str],
     selected_feature_names: list[str],
     config: FeatureSelectionConfig,
 ) -> dict[str, object]:
@@ -172,6 +196,7 @@ def build_selection_summary(
         "sfi_survivor_count": passes_sfi_count,
         "linear_survivor_count": len(linear_survivors),
         "distance_survivor_count": len(distance_survivors),
+        "target_correlation_survivor_count": len(target_survivors),
         "selected_feature_count": len(selected_feature_names),
         "proxy_xgboost_params": dict(config.proxy_xgboost_params),
         "proxy_training_rounds": config.proxy_training_rounds,
@@ -179,6 +204,7 @@ def build_selection_summary(
         "sfi_min_coverage_fraction": config.sfi_min_coverage_fraction,
         "linear_correlation_threshold": config.linear_correlation_threshold,
         "distance_correlation_threshold": config.distance_correlation_threshold,
+        "target_distance_correlation_threshold": config.target_distance_correlation_threshold,
         "mda_permutation_repeats": config.mda_permutation_repeats,
     }
 

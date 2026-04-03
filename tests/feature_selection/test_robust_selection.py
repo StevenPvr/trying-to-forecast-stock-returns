@@ -18,6 +18,7 @@ from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
 from core.src.meta_model.feature_selection.correlation import (
     run_incremental_distance_correlation_pruning,
     run_incremental_linear_correlation_pruning,
+    run_target_distance_correlation_filter,
 )
 from core.src.meta_model.feature_selection.cv import SelectionFold
 from core.src.meta_model.feature_selection.mda import run_mda_selection
@@ -57,6 +58,10 @@ class _DummyCache:
             *feature_names,
         ]
         return pd.DataFrame(self._frame.loc[:, columns].copy())
+
+    def get_feature_array(self, feature_name: str) -> np.ndarray:
+        feature_series = cast(pd.Series, self._frame[feature_name])
+        return feature_series.to_numpy(dtype=np.float32, copy=True)
 
 
 def _build_subset_score(feature_names: list[str]) -> SubsetEconomicScore:
@@ -241,6 +246,81 @@ def test_distance_pruning_drops_nonlinear_duplicate() -> None:
     assert "feature_noise" in survivors
     dropped = cast(pd.DataFrame, audit.loc[audit["decision"] == "drop"])
     assert "feature_curve" in set(cast(pd.Series, dropped["feature_name"]).astype(str))
+
+
+def test_target_distance_correlation_filter_keeps_only_features_linked_to_train_target() -> None:
+    frame = _make_train_frame()
+    frame[REALIZED_RETURN_COLUMN] = frame[MODEL_TARGET_COLUMN]
+    frame["feature_signal"] = frame[MODEL_TARGET_COLUMN]
+    frame["feature_dead"] = 1.0
+    cache = _DummyCache(frame)
+    sfi_frame = pd.DataFrame(
+        {
+            "feature_name": ["feature_signal", "feature_dead"],
+            "feature_family": ["other", "other"],
+            "feature_stem": ["feature_signal", "feature_dead"],
+            "objective_score": [0.05, 0.04],
+            "daily_rank_ic_mean": [0.05, 0.04],
+            "coverage_fraction": [1.0, 1.0],
+            "passes_sfi": [True, True],
+        },
+    )
+
+    survivors, audit = run_target_distance_correlation_filter(
+        cast(Any, cache),
+        sfi_frame,
+        ["feature_signal", "feature_dead"],
+        FeatureSelectionConfig(target_distance_correlation_threshold=0.005, parallel_workers=2),
+    )
+
+    assert survivors == ["feature_signal"]
+    signal_row = cast(pd.DataFrame, audit.loc[audit["feature_name"] == "feature_signal"]).iloc[0]
+    dead_row = cast(pd.DataFrame, audit.loc[audit["feature_name"] == "feature_dead"]).iloc[0]
+    assert bool(signal_row["passes_target_correlation"])
+    assert not bool(dead_row["passes_target_correlation"])
+    assert str(dead_row["drop_reason"]) == "low_target_distance_correlation"
+
+
+def test_target_distance_correlation_filter_avoids_threaded_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _make_train_frame()
+    frame[REALIZED_RETURN_COLUMN] = frame[MODEL_TARGET_COLUMN]
+    frame["feature_signal"] = frame[MODEL_TARGET_COLUMN]
+    cache = _DummyCache(frame)
+    sfi_frame = pd.DataFrame(
+        {
+            "feature_name": ["feature_signal"],
+            "feature_family": ["other"],
+            "feature_stem": ["feature_signal"],
+            "objective_score": [0.05],
+            "daily_rank_ic_mean": [0.05],
+            "coverage_fraction": [1.0],
+            "passes_sfi": [True],
+        },
+    )
+
+    monkeypatch.setattr(
+        "core.src.meta_model.feature_selection.correlation._score_target_distance_correlation_rows",
+        lambda cache, feature_names, target_values, threshold: [
+            {
+                "feature_name": "feature_signal",
+                "target_distance_correlation": 1.0,
+                "passes_target_correlation": True,
+                "drop_reason": "retained",
+            },
+        ],
+    )
+
+    survivors, audit = run_target_distance_correlation_filter(
+        cast(Any, cache),
+        sfi_frame,
+        ["feature_signal"],
+        FeatureSelectionConfig(target_distance_correlation_threshold=0.005, parallel_workers=12),
+    )
+
+    assert survivors == ["feature_signal"]
+    assert audit["feature_name"].tolist() == ["feature_signal"]
 
 
 def test_run_mda_selection_marks_positive_importance_feature(monkeypatch: pytest.MonkeyPatch) -> None:

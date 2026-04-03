@@ -84,6 +84,8 @@ class FeatureSelectionOutputBundle:
     linear_pruning_audit_csv: Path
     distance_correlation_audit_parquet: Path
     distance_correlation_audit_csv: Path
+    target_correlation_audit_parquet: Path
+    target_correlation_audit_csv: Path
     mda_group_scores_parquet: Path
     mda_group_scores_csv: Path
     mda_final_scores_parquet: Path
@@ -182,6 +184,8 @@ def build_feature_selection_output_bundle(
         linear_pruning_audit_csv=output_dir / "feature_linear_pruning_audit.csv",
         distance_correlation_audit_parquet=output_dir / "feature_distance_correlation_audit.parquet",
         distance_correlation_audit_csv=output_dir / "feature_distance_correlation_audit.csv",
+        target_correlation_audit_parquet=output_dir / "feature_target_correlation_audit.parquet",
+        target_correlation_audit_csv=output_dir / "feature_target_correlation_audit.csv",
         mda_group_scores_parquet=output_dir / "feature_mda_group_scores.parquet",
         mda_group_scores_csv=output_dir / "feature_mda_group_scores.csv",
         mda_final_scores_parquet=output_dir / "feature_mda_final_scores.parquet",
@@ -237,6 +241,50 @@ def load_feature_selection_metadata(
         canonical_order=canonical_order,
         train_row_indices=train_row_indices,
         available_columns=schema_info.field_names,
+    )
+
+
+def subsample_train_feature_selection_metadata(
+    metadata: FeatureSelectionMetadata,
+    *,
+    train_sampling_fraction: float,
+    minimum_unique_dates: int,
+) -> FeatureSelectionMetadata:
+    if train_sampling_fraction >= 1.0:
+        return metadata
+    if train_sampling_fraction <= 0.0:
+        raise ValueError("train_sampling_fraction must be strictly positive.")
+    train_frame = pd.DataFrame(
+        metadata.frame.take(metadata.train_row_indices).reset_index(drop=True),
+    )
+    train_dates = pd.Index(pd.to_datetime(train_frame[DATE_COLUMN]).drop_duplicates().sort_values())
+    if train_dates.empty:
+        raise ValueError("Feature selection metadata does not contain any train dates.")
+    sampled_date_count = max(
+        minimum_unique_dates,
+        int(np.ceil(len(train_dates) * train_sampling_fraction)),
+    )
+    sampled_date_count = min(len(train_dates), sampled_date_count)
+    if sampled_date_count >= len(train_dates):
+        return metadata
+    sampled_dates = pd.Index(train_dates[:sampled_date_count])
+    sampled_mask = cast(pd.Series, train_frame[DATE_COLUMN]).isin(sampled_dates)
+    sampled_train_row_indices = metadata.train_row_indices[np.flatnonzero(sampled_mask.to_numpy())]
+    LOGGER.info(
+        "Feature selection train subsampling applied: fraction=%.2f | original_train_dates=%d | sampled_train_dates=%d | original_train_rows=%d | sampled_train_rows=%d",
+        train_sampling_fraction,
+        len(train_dates),
+        sampled_date_count,
+        metadata.train_row_indices.size,
+        sampled_train_row_indices.size,
+    )
+    return FeatureSelectionMetadata(
+        frame=metadata.frame,
+        target_values=metadata.target_values,
+        ordered_dates=metadata.ordered_dates,
+        canonical_order=metadata.canonical_order,
+        train_row_indices=sampled_train_row_indices,
+        available_columns=metadata.available_columns,
     )
 
 
@@ -357,6 +405,7 @@ def save_feature_selection_outputs(
     sfi_scores: pd.DataFrame | None = None,
     linear_pruning_audit: pd.DataFrame | None = None,
     distance_correlation_audit: pd.DataFrame | None = None,
+    target_correlation_audit: pd.DataFrame | None = None,
     mda_group_scores: pd.DataFrame | None = None,
     mda_final_scores: pd.DataFrame | None = None,
     wrapper_search_history: pd.DataFrame | None = None,
@@ -404,6 +453,12 @@ def save_feature_selection_outputs(
             index=False,
         )
         distance_correlation_audit.to_csv(bundle.distance_correlation_audit_csv, index=False)
+    if target_correlation_audit is not None:
+        target_correlation_audit.to_parquet(
+            bundle.target_correlation_audit_parquet,
+            index=False,
+        )
+        target_correlation_audit.to_csv(bundle.target_correlation_audit_csv, index=False)
     if mda_group_scores is not None:
         mda_group_scores.to_parquet(bundle.mda_group_scores_parquet, index=False)
         mda_group_scores.to_csv(bundle.mda_group_scores_csv, index=False)
@@ -443,4 +498,5 @@ __all__ = [
     "load_preprocessed_feature_selection_dataset",
     "save_feature_selection_input_inventory",
     "save_feature_selection_outputs",
+    "subsample_train_feature_selection_metadata",
 ]

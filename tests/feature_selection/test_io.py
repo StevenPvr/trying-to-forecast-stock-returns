@@ -15,6 +15,7 @@ from core.src.meta_model.feature_selection.io import (
     build_selected_feature_dataset,
     discover_selection_feature_columns,
     load_feature_selection_metadata,
+    subsample_train_feature_selection_metadata,
 )
 from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN, is_excluded_feature_column
 
@@ -29,6 +30,25 @@ def _make_preprocessed_dataset() -> pd.DataFrame:
         "feature_int": [1, 2, 3],
         "feature_text": ["x", "y", "z"],
     })
+
+
+def _make_larger_preprocessed_dataset() -> pd.DataFrame:
+    dates = pd.date_range("2024-01-02", periods=10, freq="B")
+    rows: list[dict[str, object]] = []
+    for current_date in dates:
+        for ticker_index, ticker in enumerate(("AAA", "BBB")):
+            rows.append(
+                {
+                    "date": current_date,
+                    "ticker": ticker,
+                    "dataset_split": "train",
+                    MODEL_TARGET_COLUMN: float(ticker_index),
+                    "feature_float": float(ticker_index + 1),
+                    "feature_int": ticker_index + 1,
+                    "feature_text": "x",
+                },
+            )
+    return pd.DataFrame(rows)
 
 
 class TestFeatureSelectionIo:
@@ -73,6 +93,54 @@ class TestFeatureSelectionIo:
             ("2024-01-03", "BBB"),
         ]
         assert metadata.train_row_indices.tolist() == [0, 2]
+
+    def test_subsample_train_feature_selection_metadata_keeps_first_twenty_percent_of_train_dates(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        dataset_path = tmp_path / "preprocessed.parquet"
+        _make_larger_preprocessed_dataset().to_parquet(dataset_path, index=False)
+
+        metadata = load_feature_selection_metadata(dataset_path)
+        sampled = subsample_train_feature_selection_metadata(
+            metadata,
+            train_sampling_fraction=0.20,
+            minimum_unique_dates=1,
+        )
+
+        sampled_dates = pd.Index(
+            pd.to_datetime(
+                sampled.frame.take(sampled.train_row_indices).reset_index(drop=True)["date"],
+            ).drop_duplicates().sort_values(),
+        )
+        assert len(sampled_dates) == 2
+        assert sampled.train_row_indices.size == 4
+        assert sampled_dates.tolist() == [
+            pd.Timestamp("2024-01-02"),
+            pd.Timestamp("2024-01-03"),
+        ]
+
+    def test_subsample_train_feature_selection_metadata_respects_minimum_unique_dates(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        dataset_path = tmp_path / "preprocessed.parquet"
+        _make_larger_preprocessed_dataset().to_parquet(dataset_path, index=False)
+
+        metadata = load_feature_selection_metadata(dataset_path)
+        sampled = subsample_train_feature_selection_metadata(
+            metadata,
+            train_sampling_fraction=0.20,
+            minimum_unique_dates=6,
+        )
+
+        sampled_dates = pd.Index(
+            pd.to_datetime(
+                sampled.frame.take(sampled.train_row_indices).reset_index(drop=True)["date"],
+            ).drop_duplicates().sort_values(),
+        )
+        assert len(sampled_dates) == 6
+        assert sampled.train_row_indices.size == 12
 
     def test_build_selected_feature_dataset_projects_protected_columns(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
