@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import os
 import logging
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 import pandas as pd
 
+from core.src.meta_model.data.paths import REFERENCE_EARNINGS_HISTORY_CSV
 from core.src.meta_model.features_engineering.config import (
     DEEP_FEATURE_PREFIX,
     QUANT_FEATURE_PREFIX,
     TA_FEATURE_PREFIX,
 )
+from core.src.meta_model.runtime_parallelism import resolve_requested_worker_count
 from core.src.meta_model.features_engineering.deep.price_features import add_deep_price_features_for_ticker
+from core.src.meta_model.features_engineering.high_level_features import add_high_level_features
 from core.src.meta_model.features_engineering.post_processing import (
     add_calendar_features,
     add_cross_sectional_features,
@@ -36,12 +39,7 @@ def _build_ticker_feature_group(group: pd.DataFrame) -> pd.DataFrame:
 
 
 def resolve_max_workers(requested_workers: int | None = None) -> int:
-    if requested_workers is not None:
-        if requested_workers <= 0:
-            raise ValueError("max_workers must be strictly positive.")
-        return requested_workers
-    detected_cpus = os.cpu_count() or 1
-    return max(1, detected_cpus - 1)
+    return resolve_requested_worker_count(requested_workers)
 
 
 def iter_ticker_feature_groups(
@@ -67,14 +65,24 @@ def iter_ticker_feature_groups(
         ticker_count,
         worker_count,
     )
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
-        for group in executor.map(_build_ticker_feature_group, groups):
-            yield group
+    try:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            for group in executor.map(_build_ticker_feature_group, groups):
+                yield group
+    except (NotImplementedError, PermissionError, OSError) as exc:
+        LOGGER.warning(
+            "Falling back to sequential feature engineering because process workers are unavailable: %s",
+            exc,
+        )
+        for group in groups:
+            yield _build_ticker_feature_group(group)
 
 
 def build_feature_dataset(
     df: pd.DataFrame,
     max_workers: int | None = None,
+    *,
+    earnings_path: Path = REFERENCE_EARNINGS_HISTORY_CSV,
 ) -> pd.DataFrame:
     validate_base_columns(df)
     prepared: pd.DataFrame = prepare_input_dataset(df)
@@ -87,6 +95,7 @@ def build_feature_dataset(
     enriched = add_universe_market_features(enriched)
     enriched = add_cross_sectional_features(enriched)
     enriched = add_calendar_features(enriched)
+    enriched = add_high_level_features(enriched, earnings_path=earnings_path)
     enriched = drop_internal_columns(enriched)
     enriched = enriched.sort_values(["date", "ticker"]).reset_index(drop=True)
 

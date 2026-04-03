@@ -25,7 +25,7 @@ def _normalize_timestamp(value: str | date | datetime | pd.Timestamp) -> pd.Time
     timestamp = pd.Timestamp(value)
     if pd.isna(timestamp):
         raise ValueError(f"Invalid timestamp value: {value!r}")
-    return cast(pd.Timestamp, timestamp.floor("D"))
+    return timestamp.floor("D")
 
 
 def _normalize_datetime_index(

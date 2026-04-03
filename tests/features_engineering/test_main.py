@@ -20,12 +20,15 @@ from core.src.meta_model.features_engineering.main import (
     build_ta_feature_dataset,
     build_feature_dataset,
     load_cleaned_dataset,
-    merge_secondary_oos_predictions,
     main,
     save_feature_dataset,
     save_lagged_feature_dataset,
 )
-from core.src.meta_model.features_engineering.lag_features import build_lagged_feature_group
+from core.src.meta_model.features_engineering.pipeline import resolve_max_workers
+from core.src.meta_model.features_engineering.lag_features import (
+    build_lagged_feature_group,
+    get_laggable_feature_columns,
+)
 
 
 def _make_cleaned_price_df(tickers: tuple[str, ...] = ("AAPL", "MSFT")) -> pd.DataFrame:
@@ -82,6 +85,17 @@ class TestLoadCleanedDataset:
 
 
 class TestBuildTaFeatureDataset:
+    def test_resolve_max_workers_defaults_to_all_detected_cores(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "core.src.meta_model.runtime_parallelism.os.cpu_count",
+            lambda: 8,
+        )
+
+        assert resolve_max_workers() == 8
+
     def test_rejects_duplicate_date_ticker_rows(self) -> None:
         df: pd.DataFrame = _make_cleaned_price_df(("AAPL",))
         duplicated: pd.DataFrame = pd.concat([df, df.iloc[[0]]], ignore_index=True)
@@ -328,6 +342,19 @@ class TestSaveFeatureDataset:
 
 
 class TestFeatureLags:
+    def test_excludes_non_numeric_company_columns_from_laggable_features(self) -> None:
+        featured = build_feature_dataset(_make_cleaned_price_df_with_exogenous_features())
+        featured["company_name"] = np.where(
+            featured["ticker"] == "AAPL",
+            "Apple Inc.",
+            "Microsoft Corporation",
+        )
+
+        laggable_columns = get_laggable_feature_columns(list(featured.columns), featured)
+
+        assert "company_name" not in laggable_columns
+        assert "company_market_cap_usd" in laggable_columns
+
     def test_adds_lags_only_for_dynamic_feature_families(self) -> None:
         featured: pd.DataFrame = build_feature_dataset(_make_cleaned_price_df(("AAPL",)))
 
@@ -338,6 +365,10 @@ class TestFeatureLags:
             "quant_momentum_21d_lag_5d",
             "quant_universe_return_1d_ex_self_lag_10d",
             "stock_open_log_return_lag_1d",
+            "xtb_spread_to_realized_vol_21d_lag_1d",
+            "sector_relative_gap_return_lag_5d",
+            "open_above_prev_high_flag_lag_1d",
+            "earnings_days_to_next_lag_1d",
         ):
             assert column in lagged.columns
 
@@ -430,42 +461,16 @@ class TestFeatureLags:
 
 
 class TestMain:
-    def test_merge_secondary_oos_predictions_adds_prediction_columns_when_available(self, tmp_path: Path) -> None:
-        featured = build_feature_dataset(_make_cleaned_price_df(("AAPL",)))
-        oos_path = tmp_path / "secondary_oos.parquet"
-        oos_predictions = pd.DataFrame({
-            "date": [featured["date"].iloc[0], featured["date"].iloc[0], featured["date"].iloc[1]],
-            "ticker": [featured["ticker"].iloc[0], featured["ticker"].iloc[0], featured["ticker"].iloc[1]],
-            "dataset_split": ["val", "test", "val"],
-            "pred_future_trend_5d": [0.1, np.nan, 0.2],
-            "pred_future_drawdown_5d": [np.nan, -0.1, -0.2],
-        })
-        oos_predictions.to_parquet(oos_path, index=False)
-
-        merged = merge_secondary_oos_predictions(featured, secondary_oos_predictions_path=oos_path)
-
-        assert "pred_future_trend_5d" in merged.columns
-        assert "pred_future_drawdown_5d" in merged.columns
-        assert "dataset_split" not in merged.columns
-        first_row = merged.iloc[0]
-        assert first_row["pred_future_trend_5d"] == pytest.approx(0.1)
-        assert first_row["pred_future_drawdown_5d"] == pytest.approx(-0.1)
-        second_row = merged.iloc[1]
-        assert second_row["pred_future_trend_5d"] == pytest.approx(0.2)
-        assert second_row["pred_future_drawdown_5d"] == pytest.approx(-0.2)
-
     def test_full_flow(self, tmp_path: Path) -> None:
         input_path: Path = tmp_path / "cleaned.parquet"
         output_path: Path = tmp_path / "features.parquet"
         sample_path: Path = tmp_path / "features_sample.csv"
-        secondary_oos_path: Path = tmp_path / "missing_secondary_oos.parquet"
         _make_cleaned_price_df().to_parquet(input_path, index=False)
 
         with (
             patch("core.src.meta_model.features_engineering.main.CLEANED_OUTPUT_PARQUET", input_path),
             patch("core.src.meta_model.features_engineering.main.FEATURES_OUTPUT_PARQUET", output_path),
             patch("core.src.meta_model.features_engineering.main.FEATURES_OUTPUT_SAMPLE_CSV", sample_path),
-            patch("core.src.meta_model.features_engineering.main.SECONDARY_OOS_PREDICTIONS_PARQUET", secondary_oos_path),
         ):
             main()
 
@@ -479,38 +484,10 @@ class TestMain:
         assert result["ticker"].nunique() == 2
         assert len(result) == 240
 
-    def test_full_flow_merges_secondary_oos_predictions_when_available(self, tmp_path: Path) -> None:
-        input_path: Path = tmp_path / "cleaned.parquet"
-        output_path: Path = tmp_path / "features.parquet"
-        sample_path: Path = tmp_path / "features_sample.csv"
-        secondary_oos_path: Path = tmp_path / "secondary_oos.parquet"
-        cleaned = _make_cleaned_price_df(("AAPL",))
-        cleaned.to_parquet(input_path, index=False)
-        secondary_oos = pd.DataFrame({
-            "date": cleaned["date"].iloc[:2].tolist(),
-            "ticker": cleaned["ticker"].iloc[:2].tolist(),
-            "dataset_split": ["val", "val"],
-            "pred_future_trend_5d": [0.1, 0.2],
-        })
-        secondary_oos.to_parquet(secondary_oos_path, index=False)
-
-        with (
-            patch("core.src.meta_model.features_engineering.main.CLEANED_OUTPUT_PARQUET", input_path),
-            patch("core.src.meta_model.features_engineering.main.FEATURES_OUTPUT_PARQUET", output_path),
-            patch("core.src.meta_model.features_engineering.main.FEATURES_OUTPUT_SAMPLE_CSV", sample_path),
-            patch("core.src.meta_model.features_engineering.main.SECONDARY_OOS_PREDICTIONS_PARQUET", secondary_oos_path),
-        ):
-            main()
-
-        result = pd.read_parquet(output_path)
-        assert "pred_future_trend_5d" in result.columns
-        assert result["pred_future_trend_5d"].notna().sum() == 2
-
     def test_full_flow_calls_build_feature_dataset(self, tmp_path: Path) -> None:
         input_path: Path = tmp_path / "cleaned.parquet"
         output_path: Path = tmp_path / "features.parquet"
         sample_path: Path = tmp_path / "features_sample.csv"
-        secondary_oos_path: Path = tmp_path / "missing_secondary_oos.parquet"
         _make_cleaned_price_df(("AAPL", "MSFT", "NVDA")).to_parquet(input_path, index=False)
 
         featured = build_feature_dataset(_make_cleaned_price_df(("AAPL", "MSFT", "NVDA")), max_workers=1)
@@ -518,7 +495,6 @@ class TestMain:
             patch("core.src.meta_model.features_engineering.main.CLEANED_OUTPUT_PARQUET", input_path),
             patch("core.src.meta_model.features_engineering.main.FEATURES_OUTPUT_PARQUET", output_path),
             patch("core.src.meta_model.features_engineering.main.FEATURES_OUTPUT_SAMPLE_CSV", sample_path),
-            patch("core.src.meta_model.features_engineering.main.SECONDARY_OOS_PREDICTIONS_PARQUET", secondary_oos_path),
             patch(
                 "core.src.meta_model.features_engineering.main.build_feature_dataset",
                 return_value=featured,

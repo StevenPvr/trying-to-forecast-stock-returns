@@ -4,8 +4,10 @@ import logging
 import importlib
 import importlib.util
 import sys
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any, Protocol, TypeVar, cast
 
 import numpy as np
 import pandas as pd
@@ -16,31 +18,73 @@ if str(PROJECT_ROOT) not in sys.path:
 
 _numba_spec = importlib.util.find_spec("numba")
 NUMBA_AVAILABLE: bool = _numba_spec is not None
+DecoratedFn = TypeVar("DecoratedFn", bound=Callable[..., Any])
+
+
+class NumbaDecorator(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> Callable[[DecoratedFn], DecoratedFn]:
+        ...
+
+
 if _numba_spec is not None:  # pragma: no branch
     _numba = importlib.import_module("numba")
-    njit = _numba.njit
-    prange = _numba.prange
+    njit: NumbaDecorator = cast(NumbaDecorator, _numba.njit)
+    prange: Callable[..., Any] = cast(Callable[..., Any], _numba.prange)
 else:  # pragma: no cover - exercised when numba is unavailable locally
-    def njit(*args, **kwargs):
-        def decorator(fn):
+    def _njit_fallback(*args: Any, **kwargs: Any) -> Callable[[DecoratedFn], DecoratedFn]:
+        def decorator(fn: DecoratedFn) -> DecoratedFn:
             return fn
         return decorator
 
-    def prange(*args):
+    def _prange_fallback(*args: int) -> range:
         return range(*args)
 
+    njit = _njit_fallback
+    prange = _prange_fallback
+
 from core.src.meta_model.data.constants import RANDOM_SEED, SAMPLE_FRAC
+from core.src.meta_model.broker_xtb.costs import estimate_trade_cost
+from core.src.meta_model.broker_xtb.specs import build_default_spec_provider
 from core.src.meta_model.data.paths import (
     DATA_PREPROCESSING_DIR,
-    GREEDY_FORWARD_SELECTION_FILTERED_FEATURES_PARQUET,
+    FEATURES_OUTPUT_PARQUET,
     PREPROCESSED_OUTPUT_PARQUET,
     PREPROCESSED_OUTPUT_SAMPLE_CSV,
+    PREPROCESSED_FEATURE_REGISTRY_JSON,
+    PREPROCESSED_FEATURE_REGISTRY_PARQUET,
+    PREPROCESSED_FEATURE_SCHEMA_MANIFEST_JSON,
+    PREPROCESSED_RESEARCH_LABEL_PANEL_PARQUET,
     PREPROCESSED_TEST_PARQUET,
     PREPROCESSED_TEST_SAMPLE_CSV,
     PREPROCESSED_TRAIN_PARQUET,
     PREPROCESSED_TRAIN_SAMPLE_CSV,
     PREPROCESSED_VAL_PARQUET,
     PREPROCESSED_VAL_SAMPLE_CSV,
+)
+from core.src.meta_model.data.registry import (
+    SAFE_FFILL_MAX_DAYS_COLUMN,
+    FEATURE_NAME_COLUMN,
+    build_feature_registry,
+    build_feature_registry_from_columns,
+    save_feature_registry,
+    save_feature_schema_manifest,
+)
+from core.src.meta_model.model_contract import (
+    EXECUTION_LAG_DAYS,
+    HOLD_PERIOD_DAYS,
+    INTRADAY_BENCHMARK_RETURN_COLUMN,
+    INTRADAY_CS_RANK_TARGET_COLUMN,
+    INTRADAY_CS_ZSCORE_TARGET_COLUMN,
+    INTRADAY_EXCESS_RETURN_COLUMN,
+    INTRADAY_NET_RETURN_COLUMN,
+    MEDIUM_HOLD_GROSS_RETURN_COLUMN,
+    MEDIUM_HOLD_NET_RETURN_COLUMN,
+    LEGACY_TARGET_COLUMN,
+    MODEL_TARGET_COLUMN as CONTRACT_MODEL_TARGET_COLUMN,
+    OVERNIGHT_NET_RETURN_COLUMN,
+    REALIZED_RETURN_COLUMN,
+    SHORT_HOLD_NET_RETURN_COLUMN,
+    INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN,
 )
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -49,9 +93,11 @@ PREPROCESSING_START_DATE: date = date(2009, 1, 1)
 COVID_START_DATE: date = date(2020, 2, 1)
 COVID_END_DATE: date = date(2021, 12, 31)
 DateLike = str | date | datetime
-TARGET_COLUMN: str = "target_main"
+TARGET_COLUMN: str = LEGACY_TARGET_COLUMN
+MODEL_TARGET_COLUMN: str = CONTRACT_MODEL_TARGET_COLUMN
 SPLIT_COLUMN: str = "dataset_split"
-TARGET_HORIZON_DAYS: int = 5
+TARGET_HORIZON_DAYS: int = HOLD_PERIOD_DAYS
+TARGET_EXECUTION_LAG_DAYS: int = EXECUTION_LAG_DAYS
 FEATURE_SAMPLE_FRAC: float = 0.5
 FEATURE_SAMPLE_MAX_ROWS: int = 2000
 PEARSON_PRESCREENER_THRESHOLD: float = 0.9
@@ -60,8 +106,20 @@ TRAIN_END_DATE: date = date(2018, 11, 30)
 VAL_START_DATE: date = date(2019, 2, 1)
 VAL_END_DATE: date = date(2021, 11, 30)
 TEST_START_DATE: date = date(2022, 2, 1)
-
-
+TARGET_RELATED_COLUMNS: tuple[str, ...] = (
+    TARGET_COLUMN,
+    REALIZED_RETURN_COLUMN,
+    INTRADAY_NET_RETURN_COLUMN,
+    INTRADAY_BENCHMARK_RETURN_COLUMN,
+    INTRADAY_EXCESS_RETURN_COLUMN,
+    INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN,
+    INTRADAY_CS_ZSCORE_TARGET_COLUMN,
+    INTRADAY_CS_RANK_TARGET_COLUMN,
+    OVERNIGHT_NET_RETURN_COLUMN,
+    SHORT_HOLD_NET_RETURN_COLUMN,
+    MEDIUM_HOLD_GROSS_RETURN_COLUMN,
+    MEDIUM_HOLD_NET_RETURN_COLUMN,
+)
 def load_feature_dataset(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Input parquet not found: {path}")
@@ -87,31 +145,160 @@ def filter_from_start_date(
     return filtered.sort_values(["date", "ticker"]).reset_index(drop=True)
 
 
+def create_target_main_group(
+    group: pd.DataFrame,
+    *,
+    spec_provider: Any | None = None,
+    horizon_days: int = TARGET_HORIZON_DAYS,
+    execution_lag_days: int = TARGET_EXECUTION_LAG_DAYS,
+) -> pd.DataFrame:
+    ticker_group: pd.DataFrame = group.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
+    if ticker_group.empty:
+        return ticker_group
+
+    required_columns = {"stock_open_price", "stock_close_price"}
+    missing_columns = required_columns.difference(ticker_group.columns)
+    if missing_columns:
+        missing_list = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Missing required column(s) for target creation: {missing_list}")
+
+    resolved_spec_provider = spec_provider if spec_provider is not None else build_default_spec_provider()
+    ticker_symbol: str = str(ticker_group["ticker"].iloc[0])
+    entry_open = pd.Series(ticker_group["stock_open_price"].shift(-execution_lag_days))
+    entry_close = pd.Series(ticker_group["stock_close_price"].shift(-execution_lag_days))
+    next_open = pd.Series(ticker_group["stock_open_price"].shift(-(execution_lag_days + 1)))
+    short_exit_close = pd.Series(ticker_group["stock_close_price"].shift(-(execution_lag_days + 1)))
+    medium_exit_open = pd.Series(
+        ticker_group["stock_open_price"].shift(-(execution_lag_days + horizon_days)),
+    )
+    intraday_gross_return = np.log(entry_close / entry_open)
+    overnight_gross_return = np.log(next_open / entry_close)
+    short_hold_gross_return = np.log(short_exit_close / entry_open)
+    medium_hold_gross_return = np.log(medium_exit_open / entry_open)
+
+    def _cost_rate(
+        trade_date: pd.Timestamp,
+        holding_days: int,
+        ticker_name: str = ticker_symbol,
+    ) -> float:
+        spec = resolved_spec_provider.resolve(ticker_name, pd.Timestamp(trade_date))
+        long_cost = estimate_trade_cost(spec, side="long", expected_holding_days=holding_days)
+        short_cost = estimate_trade_cost(spec, side="short", expected_holding_days=holding_days)
+        return (long_cost.total_cost_rate + short_cost.total_cost_rate) / 2.0
+
+    trade_dates = pd.to_datetime(ticker_group["date"])
+    intraday_cost = _map_trade_costs(trade_dates, _cost_rate, 0)
+    overnight_cost = _map_trade_costs(trade_dates, _cost_rate, 1)
+    short_hold_cost = _map_trade_costs(trade_dates, _cost_rate, 1)
+    medium_hold_cost = _map_trade_costs(trade_dates, _cost_rate, horizon_days)
+
+    ticker_group[TARGET_COLUMN] = intraday_gross_return
+    ticker_group[REALIZED_RETURN_COLUMN] = intraday_gross_return
+    ticker_group[INTRADAY_NET_RETURN_COLUMN] = intraday_gross_return - intraday_cost
+    ticker_group[OVERNIGHT_NET_RETURN_COLUMN] = overnight_gross_return - overnight_cost
+    ticker_group[SHORT_HOLD_NET_RETURN_COLUMN] = short_hold_gross_return - short_hold_cost
+    ticker_group[MEDIUM_HOLD_GROSS_RETURN_COLUMN] = medium_hold_gross_return
+    ticker_group[MEDIUM_HOLD_NET_RETURN_COLUMN] = medium_hold_gross_return - medium_hold_cost
+    return ticker_group
+
+
+def _build_sector_key(data: pd.DataFrame) -> pd.Series:
+    sector_series = data.get("company_sector", pd.Series(index=data.index, dtype="object"))
+    industry_series = data.get("company_industry", pd.Series(index=data.index, dtype="object"))
+    return pd.Series(
+        sector_series.fillna(industry_series).fillna("__missing_sector__"),
+        index=data.index,
+    )
+
+
+def build_target_metric_panel(data: pd.DataFrame) -> pd.DataFrame:
+    benchmark_forward_return = data.groupby("date")[INTRADAY_NET_RETURN_COLUMN].transform("mean")
+    excess_forward_return = data[INTRADAY_NET_RETURN_COLUMN] - benchmark_forward_return
+    daily_std = data.groupby("date")[INTRADAY_NET_RETURN_COLUMN].transform("std")
+    safe_daily_std = pd.Series(daily_std.replace(0.0, np.nan))
+    cs_rank = data.groupby("date")[INTRADAY_NET_RETURN_COLUMN].rank(method="average", pct=True) - 0.5
+    sector_key = _build_sector_key(data)
+    sector_mean = data.groupby([pd.to_datetime(data["date"]), sector_key])[INTRADAY_NET_RETURN_COLUMN].transform("mean")
+
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime(data["date"]),
+            "ticker": data["ticker"].astype(str),
+            INTRADAY_BENCHMARK_RETURN_COLUMN: benchmark_forward_return,
+            INTRADAY_EXCESS_RETURN_COLUMN: excess_forward_return,
+            INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN: data[INTRADAY_NET_RETURN_COLUMN] - sector_mean,
+            INTRADAY_CS_ZSCORE_TARGET_COLUMN: (
+                excess_forward_return / safe_daily_std
+            ).replace([np.inf, -np.inf], np.nan).fillna(0.0),
+            INTRADAY_CS_RANK_TARGET_COLUMN: pd.Series(cs_rank).fillna(0.0),
+        },
+    )
+
+
+def apply_target_metric_panel(
+    data: pd.DataFrame,
+    metric_panel: pd.DataFrame,
+) -> pd.DataFrame:
+    metric_columns = [
+        "date",
+        "ticker",
+        INTRADAY_BENCHMARK_RETURN_COLUMN,
+        INTRADAY_EXCESS_RETURN_COLUMN,
+        INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN,
+        INTRADAY_CS_ZSCORE_TARGET_COLUMN,
+        INTRADAY_CS_RANK_TARGET_COLUMN,
+    ]
+    merged = data.drop(
+        columns=[column for column in metric_columns[2:] if column in data.columns],
+        errors="ignore",
+    ).merge(
+        metric_panel.loc[:, metric_columns],
+        on=["date", "ticker"],
+        how="left",
+        sort=False,
+    )
+    return pd.DataFrame(merged)
+
+
 def create_target_main(
     data: pd.DataFrame,
     horizon_days: int = TARGET_HORIZON_DAYS,
+    execution_lag_days: int = TARGET_EXECUTION_LAG_DAYS,
 ) -> pd.DataFrame:
     enriched: pd.DataFrame = data.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
-
-    if "stock_close_price" not in enriched.columns:
-        raise ValueError("Missing required column for target creation: stock_close_price")
-
+    spec_provider = build_default_spec_provider()
     target_parts: list[pd.DataFrame] = []
     for _, group in enriched.groupby("ticker", sort=False):
-        ticker_group: pd.DataFrame = group.copy()
-        future_close: pd.Series = pd.Series(
-            ticker_group["stock_close_price"].shift(-horizon_days),
+        target_parts.append(
+            create_target_main_group(
+                group,
+                spec_provider=spec_provider,
+                horizon_days=horizon_days,
+                execution_lag_days=execution_lag_days,
+            ),
         )
-        ticker_group[TARGET_COLUMN] = np.log(future_close / ticker_group["stock_close_price"])
-        target_parts.append(ticker_group)
 
     result: pd.DataFrame = pd.concat(target_parts, ignore_index=True)
+    result = apply_target_metric_panel(result, build_target_metric_panel(result))
     LOGGER.info(
-        "Created %s using a %d-trading-day forward close log return horizon.",
-        TARGET_COLUMN,
+        "Created broker-aware labels with execution_lag_days=%d and medium_hold_horizon_days=%d.",
+        execution_lag_days,
         horizon_days,
     )
     return result.sort_values(["date", "ticker"]).reset_index(drop=True)
+
+
+def _map_trade_costs(
+    trade_dates: pd.Series,
+    cost_rate_fn: Callable[[pd.Timestamp, int], float],
+    holding_days: int,
+) -> pd.Series:
+    return trade_dates.map(
+        lambda value, _cost_rate=cost_rate_fn, _holding_days=holding_days: _cost_rate(
+            pd.Timestamp(value),
+            _holding_days,
+        ),
+    )
 
 
 def exclude_covid_period(
@@ -127,7 +314,12 @@ def exclude_covid_period(
     pre_covid_dates = pd.Index(
         pd.to_datetime(filtered.loc[dates < covid_start_timestamp, "date"]).drop_duplicates().sort_values(),
     )
-    bridge_dates_before_covid = set(pre_covid_dates[-target_horizon_days:].tolist())
+    bridge_dates_before_covid: set[pd.Timestamp] = set()
+    if target_horizon_days > 0:
+        bridge_dates_before_covid = {
+            pd.Timestamp(value)
+            for value in pre_covid_dates[-target_horizon_days:].tolist()
+        }
     exclusion_mask = dates.between(covid_start_timestamp, covid_end_timestamp) | dates.isin(bridge_dates_before_covid)
     result = pd.DataFrame(filtered.loc[~exclusion_mask].copy())
     LOGGER.info(
@@ -214,8 +406,42 @@ def drop_columns_with_missing_values(
     return cleaned
 
 
+def drop_fully_missing_feature_columns(
+    data: pd.DataFrame,
+    protected_columns: list[str] | tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    protected: set[str] = set(protected_columns or [])
+    columns_to_drop: list[str] = [
+        str(column)
+        for column in data.columns
+        if column not in protected and int(data[column].notna().sum()) == 0
+    ]
+    if not columns_to_drop:
+        return data.copy()
+
+    cleaned: pd.DataFrame = data.drop(columns=columns_to_drop)
+    LOGGER.info(
+        "Dropped %d feature columns that were fully missing after preprocessing.",
+        len(columns_to_drop),
+    )
+    return cleaned
+
+
+def build_feature_fill_limits(feature_registry: pd.DataFrame) -> dict[str, int | None]:
+    registry = feature_registry.loc[:, [FEATURE_NAME_COLUMN, SAFE_FFILL_MAX_DAYS_COLUMN]].copy()
+    return {
+        str(feature_name): (
+            None
+            if pd.isna(limit_value)
+            else int(limit_value)
+        )
+        for feature_name, limit_value in registry.itertuples(index=False)
+    }
+
+
 def forward_fill_features_by_ticker(
     data: pd.DataFrame,
+    feature_fill_limits: dict[str, int | None] | None = None,
     protected_columns: list[str] | tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     protected: set[str] = set(protected_columns or [])
@@ -227,14 +453,46 @@ def forward_fill_features_by_ticker(
 
     ordered = pd.DataFrame(data.sort_values(["ticker", "date"]).reset_index(drop=True))
     missing_before = int(ordered[feature_columns].isna().sum().sum())
-    ordered[feature_columns] = ordered.groupby("ticker", sort=False)[feature_columns].ffill()
+    resolved_fill_limits = (
+        feature_fill_limits
+        if feature_fill_limits is not None
+        else build_feature_fill_limits(build_feature_registry(ordered))
+    )
+    ticker_groups = ordered.groupby("ticker", sort=False)
+    for column in feature_columns:
+        limit = resolved_fill_limits.get(column)
+        if limit is None:
+            continue
+        ordered[column] = ticker_groups[column].ffill(limit=limit)
     missing_after = int(ordered[feature_columns].isna().sum().sum())
     LOGGER.info(
-        "Forward-filled feature columns within each ticker: missing values %d -> %d.",
+        "Forward-filled feature columns within each ticker with family-specific limits: missing values %d -> %d.",
         missing_before,
         missing_after,
     )
     return ordered.sort_values(["date", "ticker"]).reset_index(drop=True)
+
+
+def save_preprocessing_contract_artifacts(data: pd.DataFrame) -> None:
+    save_preprocessing_contract_artifacts_from_columns(list(data.columns))
+
+
+def save_preprocessing_contract_artifacts_from_columns(columns: list[str]) -> None:
+    feature_registry = build_feature_registry_from_columns(columns)
+    save_feature_registry(
+        feature_registry,
+        PREPROCESSED_FEATURE_REGISTRY_PARQUET,
+        PREPROCESSED_FEATURE_REGISTRY_JSON,
+    )
+    feature_names = sorted(feature_registry[FEATURE_NAME_COLUMN].tolist())
+    save_feature_schema_manifest(
+        feature_names,
+        PREPROCESSED_FEATURE_SCHEMA_MANIFEST_JSON,
+    )
+    LOGGER.info(
+        "Saved preprocessing feature contract artifacts: features=%d",
+        len(feature_names),
+    )
 
 
 def validate_no_missing_values(data: pd.DataFrame) -> None:
@@ -249,6 +507,25 @@ def validate_no_missing_values(data: pd.DataFrame) -> None:
         for column, count in columns_with_missing.items()
     )
     raise ValueError(f"Missing values remain in preprocessed dataset: {details}")
+
+
+def validate_required_columns_not_missing(
+    data: pd.DataFrame,
+    required_columns: list[str] | tuple[str, ...],
+) -> None:
+    missing_columns = [
+        column_name
+        for column_name in required_columns
+        if column_name in data.columns and data[column_name].isna().any()
+    ]
+    if not missing_columns:
+        return
+
+    details = ", ".join(
+        f"{column_name}={int(data[column_name].isna().sum())}"
+        for column_name in missing_columns
+    )
+    raise ValueError(f"Required columns still contain missing values: {details}")
 
 
 @njit(cache=True, parallel=True)
@@ -364,31 +641,152 @@ def _sample_train_subset(train_data: pd.DataFrame, sample_frac: float) -> pd.Dat
     return sampled.sort_values(["date", "ticker"]).reset_index(drop=True)
 
 
-def _find_connected_components(edges: list[tuple[str, str]], nodes: list[str]) -> list[list[str]]:
+def _build_graph_adjacency(
+    edges: list[tuple[str, str]],
+    nodes: list[str],
+) -> dict[str, set[str]]:
     adjacency: dict[str, set[str]] = {node: set() for node in nodes}
     for left, right in edges:
         adjacency[left].add(right)
         adjacency[right].add(left)
+    return adjacency
 
+
+def _collect_connected_component(
+    start_node: str,
+    adjacency: dict[str, set[str]],
+    visited: set[str],
+) -> list[str]:
+    stack: list[str] = [start_node]
+    component: list[str] = []
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        component.append(current)
+        for neighbor in adjacency[current]:
+            if neighbor not in visited:
+                stack.append(neighbor)
+    return component
+
+
+def _find_connected_components(edges: list[tuple[str, str]], nodes: list[str]) -> list[list[str]]:
+    adjacency = _build_graph_adjacency(edges, nodes)
     components: list[list[str]] = []
     visited: set[str] = set()
     for node in nodes:
         if node in visited or not adjacency[node]:
             continue
-        stack: list[str] = [node]
-        component: list[str] = []
-        while stack:
-            current = stack.pop()
-            if current in visited:
-                continue
-            visited.add(current)
-            component.append(current)
-            for neighbor in adjacency[current]:
-                if neighbor not in visited:
-                    stack.append(neighbor)
+        component = _collect_connected_component(node, adjacency, visited)
         if len(component) > 1:
             components.append(sorted(component))
     return components
+
+
+def _build_abs_pearson_matrix(sampled_features: pd.DataFrame) -> pd.DataFrame:
+    raw_corr = pd.DataFrame(sampled_features.corr(method="pearson"))
+    return pd.DataFrame(
+        np.abs(raw_corr.to_numpy()),
+        index=sampled_features.columns,
+        columns=sampled_features.columns,
+    )
+
+
+def _pearson_corr_value(
+    pearson_corr: pd.DataFrame,
+    left_column: str,
+    right_column: str,
+) -> float | None:
+    corr_raw: Any = pearson_corr.at[left_column, right_column]
+    if pd.isna(corr_raw):
+        return None
+    try:
+        corr_scalar = np.asarray(corr_raw, dtype=np.float64).item()
+        return float(corr_scalar)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_candidate_pairs(
+    candidate_columns: list[str],
+    pearson_corr: pd.DataFrame,
+    prescreener_threshold: float,
+) -> list[tuple[str, str]]:
+    candidate_pairs: list[tuple[str, str]] = []
+    for left_index, left_column in enumerate(candidate_columns):
+        for right_column in candidate_columns[left_index + 1:]:
+            corr_value = _pearson_corr_value(pearson_corr, left_column, right_column)
+            if corr_value is not None and corr_value >= prescreener_threshold:
+                candidate_pairs.append((left_column, right_column))
+    return candidate_pairs
+
+
+def _distance_to_target(
+    sampled_train: pd.DataFrame,
+    column: str,
+    target_values: np.ndarray,
+) -> float:
+    column_values = sampled_train[column].to_numpy(dtype=np.float64)
+    return _distance_correlation(column_values, target_values)
+
+
+def _evaluate_candidate_pairs(
+    sampled_train: pd.DataFrame,
+    candidate_pairs: list[tuple[str, str]],
+    target_column: str,
+    distance_threshold: float,
+) -> tuple[list[tuple[str, str]], dict[str, float]]:
+    target_values: np.ndarray = sampled_train[target_column].to_numpy(dtype=np.float64)
+    target_scores: dict[str, float] = {}
+    strong_edges: list[tuple[str, str]] = []
+    progress_interval: int = max(1, len(candidate_pairs) // 20)
+
+    for pair_index, (left_column, right_column) in enumerate(candidate_pairs, start=1):
+        pair_score = _distance_correlation(
+            sampled_train[left_column].to_numpy(dtype=np.float64),
+            sampled_train[right_column].to_numpy(dtype=np.float64),
+        )
+        if pair_score >= distance_threshold:
+            strong_edges.append((left_column, right_column))
+            if left_column not in target_scores:
+                target_scores[left_column] = _distance_to_target(
+                    sampled_train,
+                    left_column,
+                    target_values,
+                )
+            if right_column not in target_scores:
+                target_scores[right_column] = _distance_to_target(
+                    sampled_train,
+                    right_column,
+                    target_values,
+                )
+        if pair_index == 1 or pair_index % progress_interval == 0 or pair_index == len(candidate_pairs):
+            LOGGER.info(
+                "Distance-correlation pruning progress: %d/%d pairs evaluated, %d strong pairs found.",
+                pair_index,
+                len(candidate_pairs),
+                len(strong_edges),
+            )
+    return strong_edges, target_scores
+
+
+def _select_columns_to_drop(
+    strong_edges: list[tuple[str, str]],
+    candidate_columns: list[str],
+    target_scores: dict[str, float],
+) -> set[str]:
+    components = _find_connected_components(strong_edges, candidate_columns)
+    columns_to_drop: set[str] = set()
+    for component in components:
+        keep_column = max(
+            component,
+            key=lambda column: (target_scores.get(column, 0.0), column),
+        )
+        for column in component:
+            if column != keep_column:
+                columns_to_drop.add(column)
+    return columns_to_drop
 
 
 def prune_correlated_features(
@@ -421,18 +819,12 @@ def prune_correlated_features(
         return data
 
     sampled_features: pd.DataFrame = pd.DataFrame(sampled_train.loc[:, candidate_columns])
-    raw_corr = pd.DataFrame(sampled_features.corr(method="pearson"))
-    pearson_corr: pd.DataFrame = pd.DataFrame(
-        np.abs(raw_corr.to_numpy()),
-        index=candidate_columns,
-        columns=candidate_columns,
+    pearson_corr = _build_abs_pearson_matrix(sampled_features)
+    candidate_pairs = _build_candidate_pairs(
+        candidate_columns,
+        pearson_corr,
+        prescreener_threshold,
     )
-    candidate_pairs: list[tuple[str, str]] = []
-    for left_index, left_column in enumerate(candidate_columns):
-        for right_column in candidate_columns[left_index + 1:]:
-            corr_value = pearson_corr.loc[left_column, right_column]
-            if pd.notna(corr_value) and float(corr_value) >= prescreener_threshold:
-                candidate_pairs.append((left_column, right_column))
 
     LOGGER.info(
         "Pearson prescreener retained %d candidate feature pairs above %.2f.",
@@ -443,48 +835,21 @@ def prune_correlated_features(
     if not candidate_pairs:
         return data
 
-    target_values: np.ndarray = sampled_train[target_column].to_numpy(dtype=np.float64)
-    target_scores: dict[str, float] = {}
-    strong_edges: list[tuple[str, str]] = []
-    progress_interval: int = max(1, len(candidate_pairs) // 20)
-    for pair_index, (left_column, right_column) in enumerate(candidate_pairs, start=1):
-        pair_score = _distance_correlation(
-            sampled_train[left_column].to_numpy(dtype=np.float64),
-            sampled_train[right_column].to_numpy(dtype=np.float64),
-        )
-        if pair_score >= distance_threshold:
-            strong_edges.append((left_column, right_column))
-            if left_column not in target_scores:
-                target_scores[left_column] = _distance_correlation(
-                    sampled_train[left_column].to_numpy(dtype=np.float64),
-                    target_values,
-                )
-            if right_column not in target_scores:
-                target_scores[right_column] = _distance_correlation(
-                    sampled_train[right_column].to_numpy(dtype=np.float64),
-                    target_values,
-                )
-        if pair_index == 1 or pair_index % progress_interval == 0 or pair_index == len(candidate_pairs):
-            LOGGER.info(
-                "Distance-correlation pruning progress: %d/%d pairs evaluated, %d strong pairs found.",
-                pair_index,
-                len(candidate_pairs),
-                len(strong_edges),
-            )
+    strong_edges, target_scores = _evaluate_candidate_pairs(
+        sampled_train,
+        candidate_pairs,
+        target_column,
+        distance_threshold,
+    )
 
     if not strong_edges:
         return data
 
-    components: list[list[str]] = _find_connected_components(strong_edges, candidate_columns)
-    columns_to_drop: set[str] = set()
-    for component in components:
-        keep_column = max(
-            component,
-            key=lambda column: (target_scores.get(column, 0.0), column),
-        )
-        for column in component:
-            if column != keep_column:
-                columns_to_drop.add(column)
+    columns_to_drop = _select_columns_to_drop(
+        strong_edges,
+        candidate_columns,
+        target_scores,
+    )
 
     if not columns_to_drop:
         return data
@@ -519,17 +884,21 @@ def save_preprocessed_dataset(
     return {"parquet": parquet_path, "sample_csv": csv_path}
 
 
-def _save_split_datasets(data: pd.DataFrame) -> None:
-    split_outputs: tuple[tuple[str, Path, Path], ...] = (
-        ("train", PREPROCESSED_TRAIN_PARQUET, PREPROCESSED_TRAIN_SAMPLE_CSV),
-        ("val", PREPROCESSED_VAL_PARQUET, PREPROCESSED_VAL_SAMPLE_CSV),
-        ("test", PREPROCESSED_TEST_PARQUET, PREPROCESSED_TEST_SAMPLE_CSV),
+def save_research_label_panel(data: pd.DataFrame) -> None:
+    label_columns = ["date", "ticker", *TARGET_RELATED_COLUMNS]
+    label_panel = pd.DataFrame(data.loc[:, [column for column in label_columns if column in data.columns]].copy())
+    PREPROCESSED_RESEARCH_LABEL_PANEL_PARQUET.parent.mkdir(parents=True, exist_ok=True)
+    label_panel.to_parquet(PREPROCESSED_RESEARCH_LABEL_PANEL_PARQUET, index=False)
+    LOGGER.info(
+        "Saved research label panel: %s (%d rows x %d cols)",
+        PREPROCESSED_RESEARCH_LABEL_PANEL_PARQUET,
+        len(label_panel),
+        len(label_panel.columns),
     )
-    for split_name, parquet_path, csv_path in split_outputs:
-        split_df: pd.DataFrame = pd.DataFrame(
-            data.loc[data[SPLIT_COLUMN] == split_name].copy(),
-        )
-        save_preprocessed_dataset(split_df, parquet_path, csv_path)
+
+
+def build_protected_columns() -> list[str]:
+    return ["date", "ticker", SPLIT_COLUMN, *TARGET_RELATED_COLUMNS]
 
 
 def main() -> None:
@@ -538,47 +907,43 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     DATA_PREPROCESSING_DIR.mkdir(parents=True, exist_ok=True)
-    featured: pd.DataFrame = load_feature_dataset(GREEDY_FORWARD_SELECTION_FILTERED_FEATURES_PARQUET)
-    filtered: pd.DataFrame = filter_from_start_date(featured)
-    targeted: pd.DataFrame = create_target_main(filtered)
-    covid_excluded: pd.DataFrame = exclude_covid_period(targeted)
-    split_ready: pd.DataFrame = assign_dataset_splits(covid_excluded)
-    forward_filled: pd.DataFrame = forward_fill_features_by_ticker(
-        split_ready,
-        protected_columns=["date", "ticker", TARGET_COLUMN, SPLIT_COLUMN],
+    from core.src.meta_model.data.data_preprocessing.streaming import run_streaming_preprocessing
+
+    run_streaming_preprocessing(
+        FEATURES_OUTPUT_PARQUET,
+        output_parquet_path=PREPROCESSED_OUTPUT_PARQUET,
+        output_csv_path=PREPROCESSED_OUTPUT_SAMPLE_CSV,
+        train_parquet_path=PREPROCESSED_TRAIN_PARQUET,
+        train_csv_path=PREPROCESSED_TRAIN_SAMPLE_CSV,
+        val_parquet_path=PREPROCESSED_VAL_PARQUET,
+        val_csv_path=PREPROCESSED_VAL_SAMPLE_CSV,
+        test_parquet_path=PREPROCESSED_TEST_PARQUET,
+        test_csv_path=PREPROCESSED_TEST_SAMPLE_CSV,
+        label_panel_path=PREPROCESSED_RESEARCH_LABEL_PANEL_PARQUET,
     )
-    rows_ready: pd.DataFrame = remove_rows_with_missing_values(
-        forward_filled,
-    )
-    columns_ready: pd.DataFrame = drop_columns_with_missing_values(
-        rows_ready,
-        protected_columns=["date", "ticker", TARGET_COLUMN, SPLIT_COLUMN],
-    )
-    pruned: pd.DataFrame = prune_correlated_features(columns_ready)
-    validate_no_missing_values(pruned)
-    save_preprocessed_dataset(
-        pruned,
-        PREPROCESSED_OUTPUT_PARQUET,
-        PREPROCESSED_OUTPUT_SAMPLE_CSV,
-    )
-    _save_split_datasets(pruned)
     LOGGER.info("Data preprocessing pipeline completed.")
 
 
 __all__ = [
+    "MODEL_TARGET_COLUMN",
     "TARGET_COLUMN",
+    "TARGET_RELATED_COLUMNS",
     "SPLIT_COLUMN",
     "assign_dataset_splits",
+    "build_protected_columns",
     "create_target_main",
+    "drop_fully_missing_feature_columns",
     "exclude_covid_period",
     "drop_columns_with_missing_values",
     "filter_from_start_date",
+    "build_feature_fill_limits",
     "forward_fill_features_by_ticker",
     "load_feature_dataset",
     "main",
     "prune_correlated_features",
     "remove_rows_with_missing_values",
     "save_preprocessed_dataset",
+    "validate_required_columns_not_missing",
     "validate_no_missing_values",
 ]
 

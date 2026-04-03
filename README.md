@@ -1,76 +1,217 @@
-# Prevision S&P 500
+# prevision-sp500
 
-## Pipeline du méta-modèle
+Pipeline de recherche broker-aware pour la prédiction cross-sectionnelle des stock returns et la construction d’un book CFD XTB discipliné.
 
-Le pipeline principal du projet est maintenant celui du `meta_model`.
+Le contrat de recherche du `meta_model` a été recentré autour de principes plus crédibles:
 
-L'enchaînement correct est :
+- targets broker-aware alignés sur une exécution différée d’un jour,
+- target d’entraînement cross-sectionnel standardisé,
+- embargo temporel cohérent avec la réalisation du label,
+- optimisation orientée `daily rank IC` avec diagnostics anti-overfitting,
+- évaluation enrichie avec diagnostics de signal, contraintes portefeuille et exports d’exécution manuelle.
 
-1. `data_fetching`
-   - script : [core/src/meta_model/data/data_fetching/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/data/data_fetching/main.py)
-   - rôle : récupère et fusionne les données marché, macro, calendrier, sentiment, cross-asset et univers S&P 500
-   - sortie principale : `core/data/data_fetching/dataset_2004_2025.parquet`
+## Lecture rapide
 
-2. `data_cleaning`
-   - script : [core/src/meta_model/data/data_cleaning/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/data/data_cleaning/main.py)
-   - rôle : nettoie le dataset fetché
-   - entrée : sortie de `data_fetching`
-   - sortie principale : `core/data/data_cleaning/dataset_cleaned_2004_2025.parquet`
+- Vue d’ensemble du repo: [docs/architecture.md](/Users/steven/Programmation/prevision-sp500/docs/architecture.md)
+- Contrat de recherche du méta-modèle: [docs/meta-model-research-contract.md](/Users/steven/Programmation/prevision-sp500/docs/meta-model-research-contract.md)
+- Registre de features et manifests de schéma: [docs/feature-registry.md](/Users/steven/Programmation/prevision-sp500/docs/feature-registry.md)
+- Registre de modèles et promotion: [docs/model-registry.md](/Users/steven/Programmation/prevision-sp500/docs/model-registry.md)
+- Moteur portefeuille et backtest: [docs/portfolio-engine.md](/Users/steven/Programmation/prevision-sp500/docs/portfolio-engine.md)
+- Artefacts et datasets produits: [docs/data-artifacts.md](/Users/steven/Programmation/prevision-sp500/docs/data-artifacts.md)
+- Runbook de lancement: [docs/launch-runbook.md](/Users/steven/Programmation/prevision-sp500/docs/launch-runbook.md)
+- Tests, qualité et limites connues: [docs/testing-and-quality.md](/Users/steven/Programmation/prevision-sp500/docs/testing-and-quality.md)
+- PRD de redressement: [urgent-todo.md](/Users/steven/Programmation/prevision-sp500/urgent-todo.md)
 
-3. `features_engineering`
-   - script : [core/src/meta_model/features_engineering/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/features_engineering/main.py)
-   - rôle : calcule toutes les features du méta-modèle, y compris les features `deep_*` et les lags
-   - entrée : dataset nettoyé
-   - sortie principale : `core/data/features_engineering/dataset_features_2004_2025.parquet`
+## Pipeline principal actuel
 
-4. `feature_corr_pca`
-   - script : [core/src/meta_model/feature_corr_pca/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/feature_corr_pca/main.py)
-   - rôle : détecte les groupes de features très corrélées sur le `train`, applique le `Kernel PCA` sur ces groupes et produit le mapping JSON associé
-   - entrée : sortie de `features_engineering`
-   - sortie principale : `core/data/feature_corr_pca/dataset_features_corr_pca_2004_2025.parquet`
+Le pipeline du `meta_model` est orchestré par des `main.py` et suit désormais un seul chemin canonique.
 
-5. `greedy_forward_selection`
-   - script : [core/src/meta_model/feature_selection_lag/greedy_forward_selection/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/feature_selection_lag/greedy_forward_selection/main.py)
-   - rôle : sélectionne un sous-ensemble de features à partir de la sortie `feature_corr_pca`
-   - entrée : sortie de `feature_corr_pca`
-   - sortie principale : `core/data/feature_selection/dataset_features_greedy_forward_selected.parquet`
+1. `broker_xtb`
+   - [core/src/meta_model/broker_xtb/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/broker_xtb/main.py)
+   - Régénère le snapshot officiel XTB et alimente la référence broker stricte utilisée par le reste du pipeline.
 
-6. `data_preprocessing`
-   - script : [core/src/meta_model/data/data_preprocessing/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/data/data_preprocessing/main.py)
-   - rôle : crée `target_main`, assigne les splits `train/val/test`, forward-fill les features par ticker, retire les lignes/colonnes invalides et prune certaines corrélations résiduelles
-   - entrée : sortie de `greedy_forward_selection`
-   - sortie principale : `core/data/data_preprocessing/dataset_preprocessed_2009_2025.parquet`
-   - sorties annexes :
-     - `dataset_preprocessed_train.parquet`
-     - `dataset_preprocessed_val.parquet`
-     - `dataset_preprocessed_test.parquet`
+2. `data_reference`
+   - [core/src/meta_model/data/data_reference/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/data/data_reference/main.py)
+   - Régénère les références PIT du pipeline:
+     - historique de membership S&P 500,
+     - fondamentaux PIT filtrés sur l’univers XTB,
+     - priorité `WRDS direct -> extract WRDS -> bootstrap open source`.
 
-7. `optimize_parameters`
-   - script : [core/src/meta_model/optimize_parameters/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/optimize_parameters/main.py)
-   - rôle : optimise les hyperparamètres XGBoost sur la sortie préprocessée
-   - entrée : sortie de `data_preprocessing`
-   - sortie principale : `core/data/optimize_parameters/xgboost_best_params.json`
+3. `launch`
+   - [core/src/meta_model/launch/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/launch/main.py)
+   - Vérifie la readiness minimale de lancement:
+     - présence des références obligatoires,
+     - snapshot XTB strict,
+     - disponibilité `lightgbm`,
+     - présence de `FRED_API_KEY`.
 
-8. `evaluate`
-   - script : [core/src/meta_model/evaluate/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/evaluate/main.py)
-   - rôle : recharge le dataset préprocessé et les meilleurs hyperparamètres, entraîne le modèle final en walk-forward daily retrain, produit les prédictions de test et le backtest
-   - entrées :
-     - sortie de `data_preprocessing`
-     - sortie de `optimize_parameters`
-   - sorties principales :
-     - `core/data/evaluate/test_predictions.parquet`
-     - `core/data/evaluate/backtest_trades.parquet`
-     - `core/data/evaluate/backtest_daily.parquet`
-     - `core/data/evaluate/backtest_summary.json`
+4. `data_fetching`
+   - [core/src/meta_model/data/data_fetching/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/data/data_fetching/main.py)
+   - Construit le panel brut marché/macro/calendrier/sentiment/cross-asset sur un univers PIT déjà intersecté avec les stock CFDs XTB explicitement présents dans le snapshot broker.
 
-## Résumé court
+5. `data_cleaning`
+   - [core/src/meta_model/data/data_cleaning/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/data/data_cleaning/main.py)
+   - Nettoie le panel avant feature engineering.
 
-Le flux exact du méta-modèle est :
+6. `features_engineering`
+   - [core/src/meta_model/features_engineering/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/features_engineering/main.py)
+   - Produit les features tabulaires et leurs lags.
 
-`data_fetching -> data_cleaning -> features_engineering -> feature_corr_pca -> greedy_forward_selection -> data_preprocessing -> optimize_parameters -> evaluate`
+7. `data_preprocessing`
+   - [core/src/meta_model/data/data_preprocessing/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/data/data_preprocessing/main.py)
+   - Repart directement du dataset de features canonique.
+   - Construit un panel de labels broker-aware avec primaire `intraday_open_to_close`, assigne les splits, applique une politique d’imputation pilotée par registre et fige un contrat de colonnes traçable.
 
-## Important
+8. `feature_selection`
+   - [core/src/meta_model/feature_selection/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/feature_selection/main.py)
+   - Score les features uniquement sur le split `train`, mesure leur stabilité par folds temporels, puis prune la redondance avant de produire le dataset canonique pour le modeling.
 
-- `evaluate` est uniquement le pipeline de backtest du méta-modèle.
-- Les `secondary_model` ne passent pas par `evaluate`.
-- Les `secondary_model` branchent actuellement à partir de la sortie de `features_engineering`, via [core/src/secondary_model/data/data_preprocessing/main.py](/Users/steven/Programmation/prevision-sp500/core/src/secondary_model/data/data_preprocessing/main.py).
+9. `optimize_parameters`
+   - [core/src/meta_model/optimize_parameters/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/optimize_parameters/main.py)
+   - Tune XGBoost sur le dataset filtré, avec un objectif de `daily rank IC` robuste, un ledger de trials et un rapport d’overfitting.
+
+10. `model_registry`
+   - [core/src/meta_model/model_registry/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/model_registry/main.py)
+   - Fournit les modèles comparés sur le même protocole: `ridge`, `elastic_net`, `factor_composite`, `xgboost`, et `lightgbm`.
+   - Ce module est un registre partagé consommé par `optimize_parameters` et `evaluate`, pas une étape CLI distincte à lancer séparément.
+
+11. `evaluate`
+   - [core/src/meta_model/evaluate/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/evaluate/main.py)
+   - Entraîne chaque modèle en walk-forward, compare leurs métriques signal et portefeuille, applique les garde-fous `PBO` / `DSR`, puis promeut le meilleur selon l’alpha benchmark-relative.
+
+12. `broker_xtb_bridge`
+   - [core/src/meta_model/broker_xtb](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/broker_xtb)
+   - Produit les snapshots broker, l’univers tradable XTB, les estimations de coûts/marge, et les exports `manual_orders.csv` / `manual_watchlist.csv` / `execution_checklist.json`.
+
+## Contrat de modélisation
+
+Le contrat central partagé vit dans [core/src/meta_model/model_contract.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/model_contract.py).
+
+Points clés:
+
+- `signal_date` = date à laquelle les features sont observées.
+- `execution_lag_days = 1` = les prédictions sont évaluées et backtestées à `t+1`.
+- `hold_period_days = 0` par défaut pour le primaire intraday.
+- `target_main` = label intraday brut `t+1 open -> t+1 close`.
+- `target_intraday_open_to_close_net_cs_zscore` = target d’entraînement par défaut.
+- le preprocessing produit aussi des labels `overnight`, `short_hold_1d_to_2d` et `medium_hold_3d_to_5d`.
+- la promotion finale compare `ridge`, `elastic_net`, `factor_composite`, `xgboost`, et éventuellement `lightgbm`.
+- la promotion finale est bloquée si les diagnostics `PBO` / `DSR` échouent.
+
+## Chaîne d’exécution complète
+
+La chaîne canonique complète, dans l’ordre exact, est la suivante:
+
+```bash
+.venv/bin/python core/src/meta_model/broker_xtb/main.py
+.venv/bin/python core/src/meta_model/data/data_reference/main.py
+.venv/bin/python core/src/meta_model/launch/main.py
+.venv/bin/python core/src/meta_model/data/data_fetching/main.py
+.venv/bin/python core/src/meta_model/data/data_cleaning/main.py
+.venv/bin/python core/src/meta_model/features_engineering/main.py
+.venv/bin/python core/src/meta_model/data/data_preprocessing/main.py
+.venv/bin/python core/src/meta_model/feature_selection/main.py
+.venv/bin/python core/src/meta_model/optimize_parameters/main.py
+.venv/bin/python core/src/meta_model/evaluate/main.py
+```
+
+Rôle de chaque étape:
+
+1. `broker_xtb/main.py`
+   - régénère le snapshot broker XTB officiel
+2. `data_reference/main.py`
+   - régénère les références PIT S&P 500 + fondamentaux WRDS/XTB
+3. `launch/main.py`
+   - vérifie la readiness minimale de lancement
+4. `data_fetching/main.py`
+   - construit le dataset marché + date-level XTB-first
+5. `data_cleaning/main.py`
+   - nettoie le dataset fetché
+6. `features_engineering/main.py`
+   - construit les features tabulaires et leurs lags
+7. `data_preprocessing/main.py`
+   - construit les labels broker-aware, splits, imputation et registre
+8. `feature_selection/main.py`
+   - sélectionne les features stables train-only
+9. `optimize_parameters/main.py`
+   - tune les modèles et produit le ledger / rapport anti-overfitting
+10. `evaluate/main.py`
+   - entraîne, backteste, promeut le modèle et produit les exports d’exécution manuelle
+
+## Commandes utiles
+
+Pré-requis canoniques avant un run `data_fetching` XTB-first:
+
+- `core/data/reference/sp500_membership_history.csv`
+- `core/data/reference/sp500_fundamentals_history.csv`
+- `core/data/reference/xtb/xtb_instrument_specs.json`
+- `FRED_API_KEY` dans `.env`
+
+Variables optionnelles mais recommandées:
+
+- `TIINGO_API_KEY` pour le fallback prix,
+- `ID_WRDS` et `PASSWORD_WRDS` pour la génération directe des fondamentaux WRDS.
+
+Régénérer le snapshot XTB officiel:
+
+```bash
+.venv/bin/python core/src/meta_model/broker_xtb/main.py
+```
+
+Régénérer les références PIT:
+
+```bash
+.venv/bin/python core/src/meta_model/data/data_reference/main.py
+```
+
+Vérifier la readiness de lancement:
+
+```bash
+.venv/bin/python core/src/meta_model/launch/main.py
+```
+
+Lancer uniquement le cœur de la chaîne une fois le bootstrap déjà à jour:
+
+```bash
+.venv/bin/python core/src/meta_model/data/data_fetching/main.py
+.venv/bin/python core/src/meta_model/data/data_cleaning/main.py
+.venv/bin/python core/src/meta_model/features_engineering/main.py
+.venv/bin/python core/src/meta_model/data/data_preprocessing/main.py
+.venv/bin/python core/src/meta_model/feature_selection/main.py
+.venv/bin/python core/src/meta_model/optimize_parameters/main.py
+.venv/bin/python core/src/meta_model/evaluate/main.py
+```
+
+Exécuter toute la suite de tests:
+
+```bash
+.venv/bin/pytest tests -q
+```
+
+Le repo utilise `pytest --import-mode=importlib` dans [pyproject.toml](/Users/steven/Programmation/prevision-sp500/pyproject.toml), ce qui évite les collisions entre multiples `test_main.py`.
+
+## État actuel vérifié
+
+Éléments vérifiés localement dans cet état du repo:
+
+- `launch/main.py` passe avec `is_ready = true`,
+- `broker_xtb/main.py` régénère `1420` `stock_cfd` et `4` `index_cfd`,
+- `data_reference/main.py` régénère:
+  - `sp500_membership_history.csv` avec `910` tickers historiques,
+  - `sp500_fundamentals_history.csv` avec `517` tickers XTB couverts,
+- `data_fetching/main.py` s’exécute jusqu’au bout et produit:
+  - `core/data/data_fetching/dataset_2004_2025.parquet`
+  - `1 634 851` lignes
+  - `111` colonnes
+- `data_cleaning/main.py` s’exécute jusqu’au bout et produit:
+  - `core/data/data_cleaning/dataset_cleaned_2004_2025.parquet`
+  - `1 634 851` lignes
+  - `109` colonnes
+
+Points encore ouverts avant de dire que toute la chaîne est validée de bout en bout dans cet environnement précis:
+
+- `features_engineering` n’a pas encore été revérifié jusqu’à sa sortie finale dans ce tour,
+- `data_preprocessing`, `feature_selection`, `optimize_parameters` et `evaluate` restent couverts par les tests, mais pas encore relancés complètement sur les nouveaux artefacts frais de `core/data/`,
+- certains anciens symboles XTB/Wikipedia n’ont pas de couverture prix satisfaisante chez les providers et sont donc éliminés au `data_fetching`.
+
+Conclusion honnête: le repo est **prêt à être lancé** au sens opérationnel du bootstrap et des deux premiers étages validés en réel, mais la validation complète de la chaîne jusqu’à `evaluate` n’a pas encore été rejouée intégralement sur les artefacts fraîchement régénérés.

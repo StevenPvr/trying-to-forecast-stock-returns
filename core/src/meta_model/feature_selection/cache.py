@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+from collections import OrderedDict
+import logging
+from pathlib import Path
+from threading import RLock
+from typing import cast
+
+import numpy as np
+import pandas as pd
+
+from core.src.meta_model.feature_selection.io import FeatureSelectionMetadata
+from core.src.meta_model.model_contract import DATE_COLUMN, MODEL_TARGET_COLUMN, REALIZED_RETURN_COLUMN, SPLIT_COLUMN, TICKER_COLUMN
+
+LOGGER: logging.Logger = logging.getLogger(__name__)
+SCORING_CONTEXT_COLUMNS: tuple[str, ...] = (
+    DATE_COLUMN,
+    TICKER_COLUMN,
+    SPLIT_COLUMN,
+    MODEL_TARGET_COLUMN,
+    REALIZED_RETURN_COLUMN,
+    "company_sector",
+    "company_beta",
+    "stock_open_price",
+    "stock_trading_volume",
+)
+
+
+class FeatureSelectionRuntimeCache:
+    def __init__(
+        self,
+        dataset_path: Path,
+        metadata: FeatureSelectionMetadata,
+        *,
+        random_seed: int,
+        max_cache_gib: float,
+    ) -> None:
+        self._dataset_path = dataset_path
+        self._metadata = metadata
+        self._random_seed = random_seed
+        self._max_cache_bytes = int(max_cache_gib * (1024.0 ** 3))
+        self._feature_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._cache_bytes = 0
+        self._cache_lock = RLock()
+        self._train_context = self._load_train_context_frame()
+
+    @property
+    def train_row_count(self) -> int:
+        return len(self._train_context)
+
+    def build_feature_frame(
+        self,
+        feature_names: list[str],
+        *,
+        row_indices: np.ndarray | None = None,
+    ) -> pd.DataFrame:
+        target_row_indices = self._resolve_row_indices(row_indices)
+        context_columns = [
+            column_name
+            for column_name in self._train_context.columns
+            if column_name not in set(feature_names)
+        ]
+        frame = pd.DataFrame(
+            self._train_context.loc[:, context_columns].take(target_row_indices).reset_index(drop=True),
+        )
+        if not feature_names:
+            return frame
+        self._ensure_feature_arrays(feature_names)
+        with self._cache_lock:
+            feature_arrays = {
+                feature_name: self._feature_cache[feature_name]
+                for feature_name in feature_names
+                if feature_name in self._feature_cache
+            }
+        missing_from_cache = [feature_name for feature_name in feature_names if feature_name not in feature_arrays]
+        if missing_from_cache:
+            LOGGER.info(
+                "Feature selection cache fallback: loading %d columns directly from parquet because they are not retained in cache",
+                len(missing_from_cache),
+            )
+            feature_arrays.update(self._load_feature_arrays_direct(missing_from_cache))
+        selected_feature_frame = pd.DataFrame(
+            {
+                feature_name: feature_arrays[feature_name][target_row_indices]
+                for feature_name in feature_names
+            },
+            index=frame.index,
+        )
+        return pd.concat([frame, selected_feature_frame], axis=1)
+
+    def build_sampled_feature_frame(
+        self,
+        feature_names: list[str],
+        *,
+        sample_size: int,
+    ) -> pd.DataFrame:
+        sample_positions = self._build_sample_positions(sample_size)
+        feature_frame = self.build_feature_frame(feature_names, row_indices=sample_positions)
+        sampled_frame = cast(pd.DataFrame, feature_frame.loc[:, feature_names].copy())
+        return pd.DataFrame(sampled_frame)
+
+    def get_feature_array(self, feature_name: str) -> np.ndarray:
+        self._ensure_feature_arrays([feature_name])
+        with self._cache_lock:
+            return np.array(self._feature_cache[feature_name], dtype=np.float32, copy=True)
+
+    def feature_coverage_fraction(self, feature_name: str) -> float:
+        feature_array = self.get_feature_array(feature_name)
+        if feature_array.size == 0:
+            return 0.0
+        finite_mask = np.isfinite(feature_array)
+        return float(np.mean(finite_mask))
+
+    def _load_train_context_frame(self) -> pd.DataFrame:
+        available_columns = [column_name for column_name in SCORING_CONTEXT_COLUMNS if column_name in self._metadata.available_columns]
+        loaded = pd.read_parquet(self._dataset_path, columns=available_columns)
+        ordered = pd.DataFrame(loaded.take(self._metadata.canonical_order))
+        train_frame = pd.DataFrame(ordered.take(self._metadata.train_row_indices).reset_index(drop=True))
+        if DATE_COLUMN in train_frame.columns:
+            date_series = cast(pd.Series, train_frame[DATE_COLUMN])
+            train_frame[DATE_COLUMN] = pd.to_datetime(date_series)
+        return train_frame
+
+    def _resolve_row_indices(self, row_indices: np.ndarray | None) -> np.ndarray:
+        if row_indices is None:
+            return np.arange(self.train_row_count, dtype=np.int64)
+        return np.asarray(row_indices, dtype=np.int64)
+
+    def _build_sample_positions(self, sample_size: int) -> np.ndarray:
+        if sample_size <= 0 or self.train_row_count <= sample_size:
+            return np.arange(self.train_row_count, dtype=np.int64)
+        rng = np.random.default_rng(self._random_seed)
+        sampled = rng.choice(np.arange(self.train_row_count, dtype=np.int64), size=sample_size, replace=False)
+        return np.sort(sampled)
+
+    def _ensure_feature_arrays(self, feature_names: list[str]) -> None:
+        with self._cache_lock:
+            missing_columns = [feature_name for feature_name in feature_names if feature_name not in self._feature_cache]
+            if not missing_columns:
+                self._touch_feature_arrays(feature_names)
+                return
+        loaded = pd.read_parquet(self._dataset_path, columns=missing_columns)
+        ordered = pd.DataFrame(loaded.take(self._metadata.canonical_order))
+        train_frame = pd.DataFrame(ordered.take(self._metadata.train_row_indices).reset_index(drop=True))
+        with self._cache_lock:
+            for feature_name in missing_columns:
+                if feature_name in self._feature_cache:
+                    continue
+                feature_series = cast(pd.Series, train_frame[feature_name])
+                feature_array = feature_series.to_numpy(dtype=np.float32, copy=False)
+                cached_array = np.array(feature_array, dtype=np.float32, copy=True)
+                self._feature_cache[feature_name] = cached_array
+                self._cache_bytes += cached_array.nbytes
+            self._touch_feature_arrays(feature_names)
+            self._enforce_cache_limit()
+
+    def _load_feature_arrays_direct(self, feature_names: list[str]) -> dict[str, np.ndarray]:
+        loaded = pd.read_parquet(self._dataset_path, columns=feature_names)
+        ordered = pd.DataFrame(loaded.take(self._metadata.canonical_order))
+        train_frame = pd.DataFrame(ordered.take(self._metadata.train_row_indices).reset_index(drop=True))
+        feature_arrays: dict[str, np.ndarray] = {}
+        for feature_name in feature_names:
+            feature_series = cast(pd.Series, train_frame[feature_name])
+            feature_arrays[feature_name] = feature_series.to_numpy(dtype=np.float32, copy=True)
+        return feature_arrays
+
+    def _touch_feature_arrays(self, feature_names: list[str]) -> None:
+        for feature_name in feature_names:
+            self._feature_cache.move_to_end(feature_name)
+
+    def _enforce_cache_limit(self) -> None:
+        while self._cache_bytes > self._max_cache_bytes and self._feature_cache:
+            _, feature_array = self._feature_cache.popitem(last=False)
+            self._cache_bytes -= feature_array.nbytes
+
+
+__all__ = ["FeatureSelectionRuntimeCache", "SCORING_CONTEXT_COLUMNS"]

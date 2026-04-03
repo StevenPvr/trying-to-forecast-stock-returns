@@ -11,6 +11,22 @@ RANDOM_SEED: int = 7
 CHUNK_SIZE: int = 50
 MAX_RETRIES: int = 3
 RETRY_SLEEP: float = 2.0
+XTB_DEFAULT_MAX_SPREAD_BPS: float = 60.0
+
+# --- Reference data generation ---
+
+SP500_HISTORICAL_COMPONENTS_URL: str = (
+    "https://raw.githubusercontent.com/hanshof/sp500_constituents/main/"
+    "sp_500_historical_components.csv"
+)
+SP500_CURRENT_CONSTITUENTS_URL: str = (
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/"
+    "data/constituents.csv"
+)
+SP500_CURRENT_FINANCIALS_URL: str = (
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies-financials/main/"
+    "data/constituents-financials.csv"
+)
 
 # --- Fundamentals ---
 
@@ -19,7 +35,6 @@ FUNDAMENTAL_FIELDS: tuple[str, ...] = (
     "industry",
     "marketCap",
     "trailingPE",
-    "forwardPE",
     "priceToBook",
     "beta",
     "profitMargins",
@@ -29,7 +44,6 @@ FUNDAMENTAL_FIELDS: tuple[str, ...] = (
     "currentRatio",
     "bookValue",
     "trailingEps",
-    "forwardEps",
 )
 FUNDAMENTALS_SLEEP: float = 0.2
 

@@ -23,6 +23,7 @@ from core.src.meta_model.data.constants import (
 )
 from core.src.meta_model.data.paths import DATA_FETCHING_DIR
 from core.src.meta_model.data.trading_calendar import get_nyse_sessions
+from core.src.meta_model.runtime_parallelism import resolve_executor_worker_count
 
 try:
     import yfinance as yf
@@ -136,7 +137,7 @@ def _fetch_all_cross_assets(
         for idx in range(0, len(symbol_list), config.chunk_size)
     ]
 
-    with ThreadPoolExecutor() as executor:
+    with ThreadPoolExecutor(max_workers=resolve_executor_worker_count(task_count=len(chunks))) as executor:
         futures = {
             executor.submit(
                 _fetch_cross_asset_chunk_with_retry, batch, config,

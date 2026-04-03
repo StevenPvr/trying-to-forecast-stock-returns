@@ -157,7 +157,7 @@ def save_lagged_feature_groups(
     try:
         for group_index, group in enumerate(groups):
             if laggable_columns is None:
-                laggable_columns = get_laggable_feature_columns(list(group.columns))
+                laggable_columns = get_laggable_feature_columns(list(group.columns), group)
             lagged_group: pd.DataFrame = build_lagged_feature_group(
                 group,
                 laggable_columns=laggable_columns,

@@ -27,6 +27,18 @@ from core.src.meta_model.data.data_preprocessing.main import (
     save_preprocessed_dataset,
     validate_no_missing_values,
 )
+from core.src.meta_model.data.data_preprocessing.streaming import (
+    iter_ticker_groups_from_parquet,
+    PreprocessingColumnStats,
+    resolve_final_columns,
+)
+from core.src.meta_model.model_contract import (
+    INTRADAY_CS_ZSCORE_TARGET_COLUMN,
+    INTRADAY_GROSS_RETURN_COLUMN,
+    INTRADAY_BENCHMARK_RETURN_COLUMN,
+    OVERNIGHT_NET_RETURN_COLUMN,
+    SECTOR_RESIDUAL_FORWARD_RETURN_COLUMN,
+)
 
 
 def _make_feature_df() -> pd.DataFrame:
@@ -42,8 +54,10 @@ def _make_feature_df() -> pd.DataFrame:
                 {
                     "date": date,
                     "ticker": ticker,
+                    "stock_open_price": close_prices[i] - 0.5,
                     "stock_close_price": close_prices[i],
                     "stock_close_log_return": close_log_return[i],
+                    "company_sector": "Technology" if ticker == "AAPL" else "Software",
                     "feature_keep": base_signal[i],
                     "feature_drop": base_signal[i] + 0.001,
                     "feature_other": np.sin(i / 5.0),
@@ -68,6 +82,16 @@ class TestLoadFeatureDataset:
         with pytest.raises(FileNotFoundError, match="Input parquet not found"):
             load_feature_dataset(tmp_path / "missing.parquet")
 
+    def test_iterates_ticker_groups_from_single_row_group_parquet(self, tmp_path: Path) -> None:
+        path: Path = tmp_path / "features.parquet"
+        df: pd.DataFrame = _make_feature_df()
+        df.to_parquet(path, index=False)
+
+        groups = list(iter_ticker_groups_from_parquet(path))
+
+        assert [str(group["ticker"].iloc[0]) for group in groups] == ["AAPL", "MSFT"]
+        assert sum(len(group) for group in groups) == len(df)
+
 
 class TestPreprocessingSteps:
     def test_filters_from_2009_01_01(self) -> None:
@@ -75,21 +99,28 @@ class TestPreprocessingSteps:
 
         assert result["date"].min() >= pd.Timestamp("2009-01-01")
 
-    def test_creates_target_main_as_forward_weekly_close_log_return(self) -> None:
+    def test_creates_target_main_as_intraday_broker_aware_label_panel(self) -> None:
         df = pd.DataFrame(
             {
                 "date": pd.date_range("2020-01-01", periods=8, freq="B"),
                 "ticker": ["AAPL"] * 8,
-                "stock_close_price": [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0],
+                "stock_open_price": [100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0],
+                "stock_close_price": [101.0, 103.0, 105.0, 107.0, 109.0, 111.0, 113.0, 115.0],
                 "stock_close_log_return": [0.0] * 8,
+                "company_sector": ["Technology"] * 8,
             },
         )
 
         result = create_target_main(df)
 
-        assert result.loc[0, "target_main"] == pytest.approx(np.log(105.0 / 100.0))
-        assert result.loc[1, "target_main"] == pytest.approx(np.log(106.0 / 101.0))
-        assert pd.isna(result.loc[4, "target_main"])
+        assert result.loc[0, "target_main"] == pytest.approx(np.log(103.0 / 102.0))
+        assert result.loc[1, "target_main"] == pytest.approx(np.log(105.0 / 104.0))
+        assert INTRADAY_GROSS_RETURN_COLUMN in result.columns
+        assert INTRADAY_CS_ZSCORE_TARGET_COLUMN in result.columns
+        assert INTRADAY_BENCHMARK_RETURN_COLUMN in result.columns
+        assert OVERNIGHT_NET_RETURN_COLUMN in result.columns
+        assert SECTOR_RESIDUAL_FORWARD_RETURN_COLUMN in result.columns
+        assert pd.isna(result.loc[7, "target_main"])
 
     def test_excludes_covid_period_and_pre_covid_target_bridge_dates(self) -> None:
         df = pd.DataFrame(
@@ -102,7 +133,7 @@ class TestPreprocessingSteps:
             },
         )
 
-        result = exclude_covid_period(df)
+        result = exclude_covid_period(df, target_horizon_days=5)
 
         remaining_dates = result["date"].tolist()
         assert max(remaining_dates) == pd.Timestamp("2020-01-24")
@@ -223,6 +254,34 @@ class TestPreprocessingSteps:
 
         assert len(sampled) == 2000
 
+    def test_resolve_final_columns_keeps_partially_missing_features(self) -> None:
+        stats = PreprocessingColumnStats(
+            columns=["date", "ticker", "target_main", "feature_partial", "feature_empty"],
+            row_count=10,
+            missing_count_by_column={
+                "date": 0,
+                "ticker": 0,
+                "target_main": 0,
+                "feature_partial": 3,
+                "feature_empty": 10,
+            },
+            non_null_count_by_column={
+                "date": 10,
+                "ticker": 10,
+                "target_main": 10,
+                "feature_partial": 7,
+                "feature_empty": 0,
+            },
+        )
+
+        final_columns = resolve_final_columns(
+            stats,
+            protected_columns=["date", "ticker", "target_main"],
+        )
+
+        assert "feature_partial" in final_columns
+        assert "feature_empty" not in final_columns
+
 
 class TestSavePreprocessedDataset:
     def test_saves_parquet_and_sample(self, tmp_path: Path) -> None:
@@ -251,6 +310,10 @@ class TestMain:
         input_path: Path = tmp_path / "features.parquet"
         output_path: Path = tmp_path / "preprocessed.parquet"
         sample_path: Path = tmp_path / "preprocessed_sample.csv"
+        label_panel_path: Path = tmp_path / "research_label_panel.parquet"
+        registry_parquet_path: Path = tmp_path / "feature_registry.parquet"
+        registry_json_path: Path = tmp_path / "feature_registry.json"
+        manifest_path: Path = tmp_path / "feature_schema_manifest.json"
         train_path: Path = tmp_path / "train.parquet"
         train_sample_path: Path = tmp_path / "train_sample.csv"
         val_path: Path = tmp_path / "val.parquet"
@@ -260,9 +323,13 @@ class TestMain:
         _make_feature_df().to_parquet(input_path, index=False)
 
         with (
-            patch("core.src.meta_model.data.data_preprocessing.main.GREEDY_FORWARD_SELECTION_FILTERED_FEATURES_PARQUET", input_path),
+            patch("core.src.meta_model.data.data_preprocessing.main.FEATURES_OUTPUT_PARQUET", input_path),
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_OUTPUT_PARQUET", output_path),
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_OUTPUT_SAMPLE_CSV", sample_path),
+            patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_RESEARCH_LABEL_PANEL_PARQUET", label_panel_path),
+            patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_FEATURE_REGISTRY_PARQUET", registry_parquet_path),
+            patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_FEATURE_REGISTRY_JSON", registry_json_path),
+            patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_FEATURE_SCHEMA_MANIFEST_JSON", manifest_path),
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_TRAIN_PARQUET", train_path),
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_TRAIN_SAMPLE_CSV", train_sample_path),
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_VAL_PARQUET", val_path),
@@ -278,17 +345,23 @@ class TestMain:
         test = pd.read_parquet(test_path)
 
         assert "target_main" in result.columns
+        assert INTRADAY_CS_ZSCORE_TARGET_COLUMN in result.columns
         assert "dataset_split" in result.columns
         assert result["date"].min() >= pd.Timestamp("2009-01-01")
-        assert not result["date"].between("2020-02-01", "2021-12-31").any()
-        assert result.isna().sum().sum() == 0
+        assert result["target_main"].isna().sum() == 0
+        assert result["dataset_split"].isna().sum() == 0
         assert len(result) > 0
-        assert "feature_drop" not in result.columns
+        assert "feature_drop" in result.columns
+        assert "feature_with_nan" in result.columns
         assert set(result["dataset_split"].unique()) == {"train", "val", "test"}
         assert set(train["dataset_split"].unique()) == {"train"}
         assert set(val["dataset_split"].unique()) == {"val"}
         assert set(test["dataset_split"].unique()) == {"test"}
         assert sample_path.exists()
+        assert label_panel_path.exists()
+        assert registry_parquet_path.exists()
+        assert registry_json_path.exists()
+        assert manifest_path.exists()
         assert train_sample_path.exists()
         assert val_sample_path.exists()
         assert test_sample_path.exists()

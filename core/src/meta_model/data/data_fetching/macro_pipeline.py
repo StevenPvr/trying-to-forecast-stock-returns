@@ -28,6 +28,7 @@ from core.src.meta_model.data.trading_calendar import (
     get_nyse_sessions,
     shift_series_to_session_availability,
 )
+from core.src.meta_model.runtime_parallelism import resolve_executor_worker_count
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -106,7 +107,6 @@ def _fetch_single_series(
     raise RuntimeError(f"Failed to fetch {series_id} after {max_retries} retries")
 
 
-_FRED_MAX_CONCURRENT: int = 3
 _DAILY_SERIES_LAG_SESSIONS: int = 1
 _WEEKLY_SERIES_LAG_SESSIONS: int = 5
 _MONTHLY_SERIES_LAG_SESSIONS: int = 22
@@ -148,9 +148,10 @@ def _fetch_all_series(
     rate_limit_sleep: float,
 ) -> dict[str, pd.Series]:  # type: ignore[type-arg]
     results: dict[str, pd.Series] = {}  # type: ignore[type-arg]
-    semaphore: threading.Semaphore = threading.Semaphore(_FRED_MAX_CONCURRENT)
+    worker_count = resolve_executor_worker_count(task_count=len(series_ids))
+    semaphore: threading.Semaphore = threading.Semaphore(worker_count)
 
-    with ThreadPoolExecutor(max_workers=_FRED_MAX_CONCURRENT) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(
                 _fetch_series_with_semaphore,
@@ -219,4 +220,3 @@ def build_macro_dataset(config: MacroConfig) -> pd.DataFrame:
     )
     LOGGER.info("Built macro dataset: %d rows x %d columns", len(data), len(data.columns))
     return data
-

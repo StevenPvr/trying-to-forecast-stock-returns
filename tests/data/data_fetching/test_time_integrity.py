@@ -86,25 +86,29 @@ class TestAvailabilityLags:
 
 
 class TestPointInTimeUniverseAndFundamentals:
-    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_constituents")
-    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_prices")
-    def test_build_dataset_uses_snapshot_universe_by_default(
-        self,
-        mock_fetch_prices: MagicMock,
-        mock_load_constituents: MagicMock,
-    ) -> None:
-        mock_load_constituents.return_value = {"AAPL"}
-        sessions: pd.DatetimeIndex = pd.to_datetime(["2024-07-03", "2024-07-05"])
-        mock_fetch_prices.return_value = {"AAPL": _make_price_df(sessions)}
-
+    def test_build_dataset_requires_point_in_time_universe(self) -> None:
         config: PipelineConfig = PipelineConfig(
             start_date="2024-07-03",
             end_date="2024-07-05",
         )
-        result: pd.DataFrame = build_dataset(config)
 
-        assert list(result["date"]) == list(sessions)
-        assert result["ticker"].tolist() == ["AAPL", "AAPL"]
+        with pytest.raises(ValueError, match="membership_history_csv"):
+            build_dataset(config)
+
+    def test_build_dataset_requires_point_in_time_fundamentals(self, tmp_path: Path) -> None:
+        membership_path: Path = tmp_path / "membership.csv"
+        membership_path.write_text(
+            "ticker,start_date,end_date\nAAPL,2024-07-03,2024-07-05\n"
+        )
+
+        config: PipelineConfig = PipelineConfig(
+            start_date="2024-07-03",
+            end_date="2024-07-05",
+            membership_history_csv=membership_path,
+        )
+
+        with pytest.raises(ValueError, match="fundamentals_history_csv"):
+            build_dataset(config)
 
     @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_all_fundamentals")
     @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_prices")
@@ -128,6 +132,7 @@ class TestPointInTimeUniverseAndFundamentals:
             start_date="2024-07-03",
             end_date="2024-07-05",
             membership_history_csv=membership_path,
+            fundamentals_history_csv=tmp_path / "fundamentals.csv",
         )
         result: pd.DataFrame = build_dataset(config)
 
@@ -170,6 +175,47 @@ class TestPointInTimeUniverseAndFundamentals:
 
         assert result["company_market_cap_usd"].tolist() == [100, 200]
         assert result["company_trailing_pe_ratio"].tolist() == [10, 20]
+
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_all_fundamentals")
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_prices")
+    def test_build_dataset_merges_point_in_time_fundamentals_for_multiple_tickers(
+        self,
+        mock_fetch_prices: MagicMock,
+        mock_live_fundamentals: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        membership_path: Path = tmp_path / "membership.csv"
+        membership_path.write_text(
+            "ticker,start_date,end_date\nAAPL,2024-07-03,2024-07-05\nMSFT,2024-07-03,2024-07-05\n"
+        )
+        fundamentals_path: Path = tmp_path / "fundamentals.csv"
+        fundamentals_path.write_text(
+            "date,ticker,company_market_cap_usd\n"
+            "2024-07-02,AAPL,100\n"
+            "2024-07-02,MSFT,300\n"
+            "2024-07-05,AAPL,200\n"
+            "2024-07-05,MSFT,400\n"
+        )
+        sessions: pd.DatetimeIndex = pd.to_datetime(["2024-07-03", "2024-07-05"])
+        mock_fetch_prices.return_value = {
+            "AAPL": _make_price_df(sessions),
+            "MSFT": _make_price_df(sessions),
+        }
+        mock_live_fundamentals.side_effect = AssertionError(
+            "live fundamentals must not be used when PIT history is supplied",
+        )
+
+        config: PipelineConfig = PipelineConfig(
+            start_date="2024-07-03",
+            end_date="2024-07-05",
+            membership_history_csv=membership_path,
+            fundamentals_history_csv=fundamentals_path,
+        )
+
+        result: pd.DataFrame = build_dataset(config)
+
+        assert result["ticker"].tolist() == ["AAPL", "MSFT", "AAPL", "MSFT"]
+        assert result["company_market_cap_usd"].tolist() == [100, 300, 200, 400]
 
 
 class TestStrictDateFeatureBuild:

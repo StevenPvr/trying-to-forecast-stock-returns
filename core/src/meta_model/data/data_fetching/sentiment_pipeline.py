@@ -26,6 +26,7 @@ from core.src.meta_model.data.trading_calendar import (
     get_nyse_sessions,
     shift_series_to_session_availability,
 )
+from core.src.meta_model.runtime_parallelism import resolve_executor_worker_count
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 _AAII_LAG_SESSIONS: int = 5
@@ -209,7 +210,7 @@ def _build_sentiment_dataframe(
 
 def build_sentiment_dataset(config: SentimentConfig) -> pd.DataFrame:
     """Fetch AAII and GPR data in parallel, merge onto a business-day index."""
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=resolve_executor_worker_count(task_count=2)) as executor:
         aaii_future = executor.submit(_fetch_aaii_sentiment, config)
         gpr_future = executor.submit(_fetch_gpr_index, config)
         aaii_df: pd.DataFrame = aaii_future.result()

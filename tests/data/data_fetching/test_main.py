@@ -20,6 +20,7 @@ from core.src.meta_model.data.data_fetching.main import (
     _build_universe_company_listing,
     _clean_cross_asset_symbol,
     _drop_unneeded_raw_price_columns,
+    _fill_missing_beta_from_market_returns,
     _drop_high_nan_tickers,
     _drop_leading_nan_rows,
     _merge_date_features,
@@ -235,8 +236,27 @@ class TestBuildDateFeatures:
         assert len(result) == 0
 
 
+class TestFillMissingBetaFromMarketReturns:
+    def test_fills_beta_from_rolling_market_returns(self) -> None:
+        df = pd.DataFrame({
+            "date": pd.to_datetime([
+                "2024-01-02", "2024-01-02",
+                "2024-01-03", "2024-01-03",
+                "2024-01-04", "2024-01-04",
+            ]),
+            "ticker": ["AAPL", "MSFT", "AAPL", "MSFT", "AAPL", "MSFT"],
+            "adj_close_log_return": [0.01, 0.02, 0.02, 0.01, 0.03, 0.01],
+            "beta": [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan],
+        })
+
+        result = _fill_missing_beta_from_market_returns(df, window=3, min_periods=2)
+
+        assert int(result["beta"].notna().sum()) > 0
+        assert result["beta"].iloc[-1] == pytest.approx(result["beta"].iloc[-1])
+
+
 class TestResolvePipelineConfig:
-    def test_falls_back_to_automatic_snapshot_when_history_missing(
+    def test_raises_when_point_in_time_membership_history_is_missing(
         self,
         tmp_path: Path,
     ) -> None:
@@ -253,18 +273,37 @@ class TestResolvePipelineConfig:
                 missing_fundamentals,
             ),
         ):
-            config = _resolve_pipeline_config()
+            with pytest.raises(FileNotFoundError, match="membership history"):
+                _resolve_pipeline_config()
 
-        assert config.allow_current_constituents_snapshot is True
-        assert config.membership_history_csv is None
-        assert config.fundamentals_history_csv is None
+    def test_raises_when_point_in_time_fundamentals_history_is_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        membership: Path = tmp_path / "membership.csv"
+        missing_fundamentals: Path = tmp_path / "missing_fundamentals.csv"
+        membership.write_text("ticker,start_date,end_date\nAAPL,2024-01-01,2024-12-31\n")
 
-    def test_reads_standard_paths_when_present(
+        with (
+            patch(
+                "core.src.meta_model.data.data_fetching.main.MEMBERSHIP_HISTORY_CSV",
+                membership,
+            ),
+            patch(
+                "core.src.meta_model.data.data_fetching.main.FUNDAMENTALS_HISTORY_CSV",
+                missing_fundamentals,
+            ),
+        ):
+            with pytest.raises(FileNotFoundError, match="fundamentals history"):
+                _resolve_pipeline_config()
+
+    def test_raises_when_xtb_instrument_specs_are_missing(
         self,
         tmp_path: Path,
     ) -> None:
         membership: Path = tmp_path / "membership.csv"
         fundamentals: Path = tmp_path / "fundamentals.csv"
+        missing_xtb_specs: Path = tmp_path / "missing_xtb_specs.json"
         membership.write_text("ticker,start_date,end_date\nAAPL,2024-01-01,2024-12-31\n")
         fundamentals.write_text("date,ticker,company_market_cap_usd\n2024-01-02,AAPL,100\n")
 
@@ -277,11 +316,46 @@ class TestResolvePipelineConfig:
                 "core.src.meta_model.data.data_fetching.main.FUNDAMENTALS_HISTORY_CSV",
                 fundamentals,
             ),
+            patch(
+                "core.src.meta_model.data.data_fetching.main.XTB_INSTRUMENT_SPECS_REFERENCE_JSON",
+                missing_xtb_specs,
+            ),
+        ):
+            with pytest.raises(FileNotFoundError, match="XTB instrument specification"):
+                _resolve_pipeline_config()
+
+    def test_reads_standard_paths_when_present(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        membership: Path = tmp_path / "membership.csv"
+        fundamentals: Path = tmp_path / "fundamentals.csv"
+        xtb_specs: Path = tmp_path / "xtb_instrument_specs.json"
+        membership.write_text("ticker,start_date,end_date\nAAPL,2024-01-01,2024-12-31\n")
+        fundamentals.write_text("date,ticker,company_market_cap_usd\n2024-01-02,AAPL,100\n")
+        xtb_specs.write_text("[]")
+
+        with (
+            patch(
+                "core.src.meta_model.data.data_fetching.main.MEMBERSHIP_HISTORY_CSV",
+                membership,
+            ),
+            patch(
+                "core.src.meta_model.data.data_fetching.main.FUNDAMENTALS_HISTORY_CSV",
+                fundamentals,
+            ),
+            patch(
+                "core.src.meta_model.data.data_fetching.main.XTB_INSTRUMENT_SPECS_REFERENCE_JSON",
+                xtb_specs,
+            ),
         ):
             config = _resolve_pipeline_config()
 
         assert config.membership_history_csv == membership
         assert config.fundamentals_history_csv == fundamentals
+        assert config.xtb_instrument_specs_json == xtb_specs
+        assert config.xtb_only is True
+        assert config.require_xtb_snapshot is True
         assert config.allow_current_constituents_snapshot is False
 
 
@@ -524,6 +598,22 @@ class TestDropHighNanTickers:
         result: pd.DataFrame = _drop_high_nan_tickers(df, threshold=1.0)
         assert result["ticker"].nunique() == 2
 
+    def test_ignores_date_level_nan_when_price_columns_are_complete(self) -> None:
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2020-01-06", "2020-01-07", "2020-01-06", "2020-01-07"],
+                ),
+                "ticker": ["A", "A", "B", "B"],
+                "open": [1.0, 2.0, 3.0, 4.0],
+                "macro_signal": [np.nan, 1.0, np.nan, 1.0],
+            }
+        )
+
+        result: pd.DataFrame = _drop_high_nan_tickers(df, threshold=1.0)
+
+        assert result["ticker"].nunique() == 2
+
 
 # ---------------------------------------------------------------------------
 # _drop_leading_nan_rows
@@ -560,6 +650,22 @@ class TestDropLeadingNanRows:
         result: pd.DataFrame = _drop_leading_nan_rows(df)
         assert len(result) == 2
         assert result["date"].min() == pd.Timestamp("2020-01-07")
+
+    def test_ignores_sparse_company_columns_when_trimming(self) -> None:
+        df: pd.DataFrame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2020-01-06", "2020-01-07"]),
+                "ticker": ["A", "A"],
+                "open": [100.0, 101.0],
+                "macro_signal": [np.nan, 1.0],
+                "enterprise_value": [np.nan, np.nan],
+            }
+        )
+
+        result: pd.DataFrame = _drop_leading_nan_rows(df)
+
+        assert len(result) == 1
+        assert result["date"].iloc[0] == pd.Timestamp("2020-01-07")
 
 
 # ---------------------------------------------------------------------------

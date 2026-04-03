@@ -2,28 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.src.meta_model.model_contract import (
+    EXECUTION_LAG_DAYS,
+    HOLD_PERIOD_DAYS,
+    MODEL_TARGET_COLUMN,
+)
+
 TOP_FRACTION: float = 0.01
 ACTION_CAP_FRACTION: float = 0.05
 ALLOCATION_FRACTION: float = 0.05
 GROSS_CAP_FRACTION: float = 1.0
-HOLD_PERIOD_DAYS: int = 5
-TRANSACTION_COST_RATE_PER_SIDE: float = 0.003
-LONG_DAILY_FINANCING_RATE: float = 0.0002269
-SHORT_DAILY_FINANCING_RATE: float = 0.0000231
-TARGET_COLUMN: str = "target_main"
-PREDICTION_COLUMN: str = "prediction"
-DATE_COLUMN: str = "date"
-TICKER_COLUMN: str = "ticker"
-SPLIT_COLUMN: str = "dataset_split"
-TRAIN_SPLIT_NAME: str = "train"
-VAL_SPLIT_NAME: str = "val"
-TEST_SPLIT_NAME: str = "test"
-EXCLUDED_FEATURE_COLUMNS: frozenset[str] = frozenset({
-    DATE_COLUMN,
-    TICKER_COLUMN,
-    TARGET_COLUMN,
-    SPLIT_COLUMN,
-})
+TARGET_COLUMN: str = MODEL_TARGET_COLUMN
+BENCHMARK_MODE: str = "universe_equal_weight"
+NEUTRALITY_MODE: str = "sector_beta_neutral"
+ADV_PARTICIPATION_LIMIT: float = 0.05
+TURNOVER_PENALTY_BPS: float = 5.0
+MAX_SPREAD_BPS: float = 35.0
+OPEN_HURDLE_BPS: float = 12.0
+HOLD_HURDLE_BPS: float = 6.0
+PBO_MAX_THRESHOLD: float = 0.20
+DSR_MIN_THRESHOLD: float = 0.10
+APPLY_PREDICTION_HURDLE: bool = False
 
 
 @dataclass(frozen=True)
@@ -33,6 +32,27 @@ class BacktestConfig:
     allocation_fraction: float = ALLOCATION_FRACTION
     gross_cap_fraction: float = GROSS_CAP_FRACTION
     hold_period_days: int = HOLD_PERIOD_DAYS
-    transaction_cost_rate_per_side: float = TRANSACTION_COST_RATE_PER_SIDE
-    long_daily_financing_rate: float = LONG_DAILY_FINANCING_RATE
-    short_daily_financing_rate: float = SHORT_DAILY_FINANCING_RATE
+    execution_lag_days: int = EXECUTION_LAG_DAYS
+    benchmark_mode: str = BENCHMARK_MODE
+    neutrality_mode: str = NEUTRALITY_MODE
+    adv_participation_limit: float = ADV_PARTICIPATION_LIMIT
+    turnover_penalty_bps: float = TURNOVER_PENALTY_BPS
+    max_spread_bps: float = MAX_SPREAD_BPS
+    open_hurdle_bps: float = OPEN_HURDLE_BPS
+    hold_hurdle_bps: float = HOLD_HURDLE_BPS
+    apply_prediction_hurdle: bool = APPLY_PREDICTION_HURDLE
+    pbo_max_threshold: float = PBO_MAX_THRESHOLD
+    dsr_min_threshold: float = DSR_MIN_THRESHOLD
+
+
+def validate_backtest_config(config: BacktestConfig) -> None:
+    if config.execution_lag_days <= 0:
+        raise ValueError("execution_lag_days must be strictly positive to forbid same-bar execution.")
+    if not config.benchmark_mode.strip():
+        raise ValueError("benchmark_mode must be configured explicitly.")
+    if not config.neutrality_mode.strip():
+        raise ValueError("neutrality_mode must be configured explicitly.")
+    if config.max_spread_bps <= 0.0:
+        raise ValueError("max_spread_bps must be strictly positive.")
+    if config.hold_hurdle_bps >= config.open_hurdle_bps:
+        raise ValueError("hold_hurdle_bps must remain strictly below open_hurdle_bps.")

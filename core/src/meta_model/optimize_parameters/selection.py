@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 
@@ -12,6 +13,19 @@ class OneStandardErrorSelection:
     objective_standard_error: float
     complexity_penalty: float
     row: dict[str, object]
+
+
+def _series_float(row: pd.Series, column_name: str) -> float:
+    return float(np.asarray(row.at[column_name], dtype=np.float64).item())
+
+
+def _series_int(row: pd.Series, column_name: str) -> int:
+    return int(np.asarray(row.at[column_name], dtype=np.int64).item())
+
+
+def _normalize_row_dict(row: pd.Series) -> dict[str, object]:
+    raw_dict = row.to_dict()
+    return {str(key): value for key, value in raw_dict.items()}
 
 
 def select_one_standard_error_trial(
@@ -31,18 +45,24 @@ def select_one_standard_error_trial(
     if completed.empty:
         raise ValueError("No completed optimization trials are available for one-SE selection.")
 
-    best_row = completed.loc[completed[objective_column].idxmin()]
-    threshold = float(best_row[objective_column] + best_row[standard_error_column])
+    objective_values = completed[objective_column].to_numpy(dtype=np.float64, copy=False)
+    best_row_position = int(np.argmin(objective_values))
+    best_row = completed.iloc[best_row_position]
+    threshold = _series_float(best_row, objective_column) + _series_float(
+        best_row,
+        standard_error_column,
+    )
     candidates = pd.DataFrame(completed.loc[completed[objective_column] <= threshold].copy())
     ordered_candidates = candidates.sort_values(
         [complexity_column, objective_column, "trial_number"],
         ascending=[True, True, True],
     ).reset_index(drop=True)
-    selected_row = ordered_candidates.iloc[0].to_dict()
+    selected_row_series = ordered_candidates.iloc[0]
+    selected_row = _normalize_row_dict(selected_row_series)
     return OneStandardErrorSelection(
-        trial_number=int(selected_row["trial_number"]),
-        objective_score=float(selected_row[objective_column]),
-        objective_standard_error=float(selected_row[standard_error_column]),
-        complexity_penalty=float(selected_row[complexity_column]),
+        trial_number=_series_int(selected_row_series, "trial_number"),
+        objective_score=_series_float(selected_row_series, objective_column),
+        objective_standard_error=_series_float(selected_row_series, standard_error_column),
+        complexity_penalty=_series_float(selected_row_series, complexity_column),
         row=selected_row,
     )

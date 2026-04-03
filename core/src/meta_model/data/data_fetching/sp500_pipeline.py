@@ -14,6 +14,7 @@ from typing import cast
 import pandas as pd
 import requests
 
+from core.src.meta_model.broker_xtb.specs import BrokerSpecProvider, build_default_spec_provider
 from core.src.meta_model.data.constants import (
     CHUNK_SIZE,
     DEFAULT_END_DATE,
@@ -26,8 +27,10 @@ from core.src.meta_model.data.constants import (
     SAMPLE_FRAC,
     TIINGO_API_URL,
     WIKIPEDIA_SP500_URL,
+    XTB_DEFAULT_MAX_SPREAD_BPS,
 )
 from core.src.meta_model.data.paths import DATA_FETCHING_DIR, OUTPUT_PARQUET, OUTPUT_SAMPLE_CSV
+from core.src.meta_model.runtime_parallelism import resolve_executor_worker_count
 
 try:
     import yfinance as yf
@@ -66,7 +69,11 @@ class PipelineConfig:
     ticker_aliases_csv: Path | None = None
     membership_history_csv: Path | None = None
     fundamentals_history_csv: Path | None = None
-    allow_current_constituents_snapshot: bool = True
+    xtb_only: bool = False
+    xtb_instrument_specs_json: Path | None = None
+    require_xtb_snapshot: bool = False
+    xtb_max_spread_bps: float | None = None
+    allow_current_constituents_snapshot: bool = False
 
 
 def _parse_date(value: str | dt.date | dt.datetime) -> dt.date:
@@ -81,7 +88,7 @@ def _as_timestamp(value: str | dt.date | dt.datetime | pd.Timestamp) -> pd.Times
     timestamp = pd.Timestamp(value)
     if pd.isna(timestamp):
         raise ValueError(f"Invalid timestamp value: {value!r}")
-    return cast(pd.Timestamp, timestamp)
+    return timestamp
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -151,7 +158,7 @@ def _fetch_all_fundamentals(
     symbols: list[str], config: PipelineConfig,
 ) -> pd.DataFrame:
     aliases: dict[str, str] = _load_aliases(config.ticker_aliases_csv)
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=resolve_executor_worker_count(task_count=len(symbols))) as executor:
         futures = [
             executor.submit(_fetch_single_fundamental, s, aliases, config)
             for s in symbols
@@ -270,6 +277,11 @@ def load_membership_history(config: PipelineConfig) -> pd.DataFrame:
             config.membership_history_csv,
             config.start_date,
             config.end_date,
+        )
+
+    if not config.allow_current_constituents_snapshot:
+        raise ValueError(
+            "build_dataset requires membership_history_csv for a point-in-time universe.",
         )
 
     start_ts: pd.Timestamp = _as_timestamp(config.start_date)
@@ -437,10 +449,26 @@ def _fetch_prices(
         for idx in range(0, len(yfinance_symbols), config.chunk_size)
     ]
 
-    for batch in chunks:
-        results.update(
-            _fetch_chunk_with_retry(batch, start_date, end_date, symbol_lookup, config),
-        )
+    if len(chunks) <= 1:
+        for batch in chunks:
+            results.update(
+                _fetch_chunk_with_retry(batch, start_date, end_date, symbol_lookup, config),
+            )
+    else:
+        with ThreadPoolExecutor(max_workers=resolve_executor_worker_count(task_count=len(chunks))) as executor:
+            futures = [
+                executor.submit(
+                    _fetch_chunk_with_retry,
+                    batch,
+                    start_date,
+                    end_date,
+                    symbol_lookup,
+                    config,
+                )
+                for batch in chunks
+            ]
+            for future in futures:
+                results.update(future.result())
 
     if not config.use_stooq_fallback:
         return results
@@ -562,15 +590,84 @@ def _merge_point_in_time_fundamentals(
     fundamentals_history_csv: Path,
 ) -> pd.DataFrame:
     fundamentals: pd.DataFrame = _load_fundamentals_history(fundamentals_history_csv)
+    left = data.sort_values(["date", "ticker"]).reset_index(drop=True)
+    right = fundamentals.sort_values(["date", "ticker"]).reset_index(drop=True)
     merged: pd.DataFrame = pd.merge_asof(
-        data.sort_values(["ticker", "date"]).reset_index(drop=True),
-        fundamentals,
+        left,
+        right,
         on="date",
         by="ticker",
         direction="backward",
         allow_exact_matches=True,
     )
     return merged.sort_values(["date", "ticker"]).reset_index(drop=True)
+
+
+def _build_xtb_spec_provider(config: PipelineConfig) -> BrokerSpecProvider:
+    xtb_specs_path = config.xtb_instrument_specs_json
+    if xtb_specs_path is None:
+        raise ValueError(
+            "build_dataset requires xtb_instrument_specs_json when xtb_only=True.",
+        )
+    return build_default_spec_provider(
+        path=xtb_specs_path,
+        allow_defaults_if_missing=not config.require_xtb_snapshot,
+        require_explicit_symbols=config.require_xtb_snapshot,
+    )
+
+
+def _filter_membership_history_to_xtb_universe(
+    membership_history: pd.DataFrame,
+    config: PipelineConfig,
+) -> pd.DataFrame:
+    if not config.xtb_only:
+        return membership_history
+
+    provider = _build_xtb_spec_provider(config)
+    pipeline_end_date = _as_timestamp(config.end_date)
+    filtered_rows: list[dict[str, object]] = []
+
+    tickers = membership_history["ticker"].tolist()
+    start_dates = membership_history["start_date"].tolist()
+    end_dates = membership_history["end_date"].tolist()
+    for ticker_value, start_value, end_value in zip(tickers, start_dates, end_dates):
+        ticker = str(ticker_value)
+        membership_start = _as_timestamp(cast(pd.Timestamp, start_value))
+        membership_end = _as_timestamp(cast(pd.Timestamp, end_value))
+        for spec in provider.find_explicit_specs(ticker, instrument_group="stock_cfd"):
+            if (
+                config.xtb_max_spread_bps is not None
+                and spec.spread_bps > config.xtb_max_spread_bps
+            ):
+                continue
+            spec_start = _as_timestamp(spec.effective_from)
+            spec_end = (
+                pipeline_end_date
+                if spec.effective_to is None
+                else _as_timestamp(spec.effective_to)
+            )
+            clipped_start = max(membership_start, spec_start)
+            clipped_end = min(membership_end, spec_end)
+            if clipped_start > clipped_end:
+                continue
+            filtered_rows.append({
+                "ticker": ticker,
+                "start_date": clipped_start,
+                "end_date": clipped_end,
+            })
+
+    if not filtered_rows:
+        raise RuntimeError("No XTB-tradable constituents were found to fetch.")
+
+    filtered_history = pd.DataFrame(filtered_rows).drop_duplicates().sort_values(
+        ["ticker", "start_date", "end_date"],
+    )
+    LOGGER.info(
+        "XTB tradable universe filter retained %d/%d tickers",
+        filtered_history["ticker"].nunique(),
+        membership_history["ticker"].nunique(),
+    )
+    return filtered_history.reset_index(drop=True)
 
 
 
@@ -581,7 +678,31 @@ def build_dataset(config: PipelineConfig) -> pd.DataFrame:
     start_date: dt.date = _parse_date(config.start_date)
     end_date: dt.date = _parse_date(config.end_date)
 
+    if config.membership_history_csv is None and not config.allow_current_constituents_snapshot:
+        raise ValueError(
+            "build_dataset requires membership_history_csv for a point-in-time universe.",
+        )
+    if config.fundamentals_history_csv is None:
+        raise ValueError(
+            "build_dataset requires fundamentals_history_csv for point-in-time fundamentals.",
+        )
+    if config.xtb_only and config.xtb_instrument_specs_json is None:
+        raise ValueError(
+            "build_dataset requires xtb_instrument_specs_json when xtb_only=True.",
+        )
+
     membership_history: pd.DataFrame = load_membership_history(config)
+    membership_history = _filter_membership_history_to_xtb_universe(
+        membership_history,
+        dataclasses.replace(
+            config,
+            xtb_max_spread_bps=(
+                config.xtb_max_spread_bps
+                if config.xtb_max_spread_bps is not None
+                else XTB_DEFAULT_MAX_SPREAD_BPS
+            ),
+        ),
+    )
     symbols: list[str] = sorted(membership_history["ticker"].unique().tolist())
     if not symbols:
         raise RuntimeError("No constituents were found to fetch")
@@ -601,11 +722,10 @@ def build_dataset(config: PipelineConfig) -> pd.DataFrame:
         ticker_df: pd.DataFrame | None = price_map.get(symbol)
         if ticker_df is None or ticker_df.empty:
             continue
-        ticker_df = ticker_df.reindex(full_index)
-        ticker_df = ticker_df.copy()
-        ticker_df["date"] = ticker_df.index
-        ticker_df["ticker"] = symbol
-        rows.append(ticker_df)
+        ticker_data: pd.DataFrame = ticker_df.reindex(full_index).copy()
+        ticker_data["date"] = ticker_data.index
+        ticker_data["ticker"] = symbol
+        rows.append(ticker_data)
 
     if not rows:
         raise RuntimeError("No price data retrieved from providers")
@@ -622,9 +742,14 @@ def build_dataset(config: PipelineConfig) -> pd.DataFrame:
     )
     data = active_universe.merge(data, on=["date", "ticker"], how="left")
 
-    if config.fundamentals_history_csv is not None:
+    if config.fundamentals_history_csv is not None and config.fundamentals_history_csv.exists():
         data = _merge_point_in_time_fundamentals(
             data,
+            config.fundamentals_history_csv,
+        )
+    elif config.fundamentals_history_csv is not None:
+        LOGGER.warning(
+            "Fundamentals history file not found at %s. Proceeding without fundamentals merge.",
             config.fundamentals_history_csv,
         )
 

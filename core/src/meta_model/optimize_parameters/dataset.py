@@ -3,14 +3,19 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
 
-from core.src.meta_model.data.paths import PREPROCESSED_OUTPUT_PARQUET
+from core.src.meta_model.data.paths import (
+    FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
+    FEATURE_SELECTION_SCHEMA_MANIFEST_JSON,
+)
+from core.src.meta_model.data.registry import compute_feature_schema_hash, load_feature_schema_manifest
+from core.src.meta_model.model_contract import is_excluded_feature_column
 from core.src.meta_model.optimize_parameters.config import (
     DATE_COLUMN,
-    EXCLUDED_FEATURE_COLUMNS,
     SPLIT_COLUMN,
     TRAIN_SPLIT_NAME,
     TARGET_COLUMN,
@@ -19,6 +24,23 @@ from core.src.meta_model.optimize_parameters.config import (
 )
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
+
+
+def _normalize_manifest_feature_names(raw_feature_names: object) -> list[str]:
+    if not isinstance(raw_feature_names, list):
+        raise ValueError("Optimization dataset feature schema manifest is malformed.")
+    typed_feature_names = cast(list[object], raw_feature_names)
+    normalized_feature_names: list[str] = []
+    for raw_name in typed_feature_names:
+        normalized_feature_names.append(str(raw_name))
+    return normalized_feature_names
+
+
+def resolve_feature_schema_manifest_path(dataset_path: Path) -> Path | None:
+    if dataset_path == FEATURE_SELECTION_FILTERED_DATASET_PARQUET:
+        return FEATURE_SELECTION_SCHEMA_MANIFEST_JSON
+    adjacent_manifest = dataset_path.with_name("feature_schema_manifest.json")
+    return adjacent_manifest if adjacent_manifest.exists() else None
 
 
 @dataclass(frozen=True)
@@ -30,7 +52,7 @@ class OptimizationDatasetBundle:
 
 
 def load_preprocessed_dataset(
-    path: Path = PREPROCESSED_OUTPUT_PARQUET,
+    path: Path = FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
     *,
     allowed_splits: tuple[str, ...] | None = (TRAIN_SPLIT_NAME, VAL_SPLIT_NAME),
 ) -> pd.DataFrame:
@@ -68,18 +90,60 @@ def load_preprocessed_dataset(
 
 
 def build_feature_columns(data: pd.DataFrame) -> list[str]:
-    return sorted(
+    return [
         column_name
         for column_name in data.columns
-        if column_name not in EXCLUDED_FEATURE_COLUMNS
+        if not is_excluded_feature_column(column_name)
+    ]
+
+
+def validate_feature_schema_manifest(
+    feature_columns: list[str],
+    dataset_path: Path,
+) -> None:
+    manifest_path = resolve_feature_schema_manifest_path(dataset_path)
+    if manifest_path is None or not manifest_path.exists():
+        return
+    manifest = load_feature_schema_manifest(manifest_path)
+    manifest_feature_names = _normalize_manifest_feature_names(
+        manifest.get("feature_names", manifest.get("feature_columns")),
     )
+    expected_hash = str(
+        manifest.get(
+            "feature_schema_hash",
+            compute_feature_schema_hash(manifest_feature_names),
+        ),
+    )
+    actual_hash = compute_feature_schema_hash(feature_columns)
+    if actual_hash != expected_hash:
+        raise ValueError(
+            "Optimization dataset feature schema does not match the feature-selection manifest.",
+        )
 
 
-def build_optimization_dataset_bundle(data: pd.DataFrame) -> OptimizationDatasetBundle:
+def build_optimization_dataset_bundle(
+    data: pd.DataFrame,
+    dataset_path: Path = FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
+) -> OptimizationDatasetBundle:
     feature_columns = build_feature_columns(data)
+    validate_feature_schema_manifest(feature_columns, dataset_path)
+    feature_frame = pd.DataFrame(data.loc[:, feature_columns].copy())
     feature_matrix = np.ascontiguousarray(
-        data.loc[:, feature_columns].to_numpy(dtype=np.float32, copy=False),
+        feature_frame.to_numpy(dtype=np.float32, copy=False),
     )
+    invalid_mask = ~np.isfinite(feature_matrix)
+    if invalid_mask.any():
+        invalid_counts = invalid_mask.sum(axis=0, dtype=np.int64)
+        affected_columns = [
+            f"{feature_columns[column_index]}={int(invalid_counts[column_index])}"
+            for column_index in range(len(feature_columns))
+            if int(invalid_counts[column_index]) > 0
+        ]
+        LOGGER.warning(
+            "Optimization dataset contained non-finite feature values; coercing them to NaN before XGBoost | affected_columns=%s",
+            ",".join(affected_columns[:20]),
+        )
+        feature_matrix[invalid_mask] = np.nan
     target_array = np.ascontiguousarray(
         data[TARGET_COLUMN].to_numpy(dtype=np.float32, copy=False),
     )

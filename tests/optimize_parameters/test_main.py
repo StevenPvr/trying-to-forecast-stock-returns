@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false, reportArgumentType=false
 from __future__ import annotations
 
 import sys
@@ -5,20 +6,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
 from core.src.meta_model.optimize_parameters import main as optimize_main
-from core.src.meta_model.optimize_parameters.cv import build_walk_forward_folds
+from core.src.meta_model.optimize_parameters.cv import WalkForwardFold, build_walk_forward_folds
 from core.src.meta_model.optimize_parameters.dataset import load_preprocessed_dataset
 from core.src.meta_model.optimize_parameters.config import (
     DEFAULT_BOOST_ROUNDS,
     EARLY_STOPPING_ROUNDS,
+    OptimizationConfig,
 )
-from core.src.meta_model.optimize_parameters.objective import aggregate_fold_rmse
+from core.src.meta_model.optimize_parameters.objective import aggregate_fold_rank_ic, aggregate_fold_rmse
 from core.src.meta_model.optimize_parameters.parallelism import resolve_parallelism
 from core.src.meta_model.optimize_parameters.robustness import (
     aggregate_robust_objective,
@@ -27,6 +31,12 @@ from core.src.meta_model.optimize_parameters.robustness import (
 )
 from core.src.meta_model.optimize_parameters.search_space import suggest_xgboost_params
 from core.src.meta_model.optimize_parameters.selection import select_one_standard_error_trial
+
+
+def _with_model_target(frame: pd.DataFrame) -> pd.DataFrame:
+    enriched = frame.copy()
+    enriched[MODEL_TARGET_COLUMN] = enriched["target_main"].astype(float)
+    return enriched
 
 
 def _make_preprocessed_df() -> pd.DataFrame:
@@ -51,7 +61,9 @@ def _make_preprocessed_df() -> pd.DataFrame:
             "feature_a": float(idx),
             "feature_b": float(idx * 2),
         })
-    return pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True)
+    return _with_model_target(
+        pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True),
+    )
 
 
 def _make_larger_train_df() -> pd.DataFrame:
@@ -76,7 +88,9 @@ def _make_larger_train_df() -> pd.DataFrame:
             "feature_a": float(idx),
             "feature_b": float(idx * 2),
         })
-    return pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True)
+    return _with_model_target(
+        pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True),
+    )
 
 
 def _make_embargo_df() -> pd.DataFrame:
@@ -101,7 +115,9 @@ def _make_embargo_df() -> pd.DataFrame:
             "feature_a": float(idx),
             "feature_b": float(idx * 2),
         })
-    return pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True)
+    return _with_model_target(
+        pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True),
+    )
 
 
 def _make_preprocessed_with_test_df() -> pd.DataFrame:
@@ -120,14 +136,16 @@ def _make_preprocessed_with_test_df() -> pd.DataFrame:
                 "feature_a": float(idx),
                 "feature_b": float(idx * 2),
             })
-    return pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True)
+    return _with_model_target(
+        pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True),
+    )
 
 
 class TestBuildWalkForwardFolds:
     def test_builds_expanding_train_and_ordered_validation_blocks(self) -> None:
         data = _make_preprocessed_df()
 
-        folds = build_walk_forward_folds(data, fold_count=5)
+        folds = build_walk_forward_folds(data, fold_count=5, target_horizon_days=1)
 
         assert len(folds) == 5
         assert [fold.weight for fold in folds] == [1.0, 2.0, 3.0, 4.0, 5.0]
@@ -160,7 +178,38 @@ class TestAggregateFoldRmse:
         assert round(score["objective_score"], 6) == 0.234195
 
 
+class TestAggregateFoldRankIc:
+    def test_combines_rank_ic_with_stability_penalties(self) -> None:
+        aggregate = aggregate_fold_rank_ic(
+            fold_rank_ic=[0.04, 0.03, 0.05, 0.02, 0.01],
+            fold_window_std=[0.01, 0.02, 0.01, 0.03, 0.02],
+            stability_penalty_alpha=0.10,
+            train_window_stability_alpha=0.05,
+            complexity_penalty=0.01,
+            objective_standard_error=0.002,
+        )
+
+        assert round(aggregate["mean_rank_ic"], 6) == 0.030000
+        assert round(aggregate["std_rank_ic"], 6) == 0.014142
+        assert round(aggregate["objective_score"], 6) == -0.017686
+
+
 class TestResolveParallelism:
+    def test_uses_all_detected_cores_when_total_cores_not_provided(
+        self,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "core.src.meta_model.runtime_parallelism.os.cpu_count",
+            lambda: 12,
+        )
+
+        plan = resolve_parallelism(total_cores=None, fold_count=5)
+
+        assert plan.total_cores == 12
+        assert plan.fold_workers == 5
+        assert plan.threads_per_fold == 2
+
     def test_allocates_threads_across_parallel_folds(self) -> None:
         plan = resolve_parallelism(total_cores=11, fold_count=5)
 
@@ -184,6 +233,113 @@ class TestOptimizationDefaults:
     def test_uses_generous_xgboost_early_stopping_defaults(self) -> None:
         assert DEFAULT_BOOST_ROUNDS == 3000
         assert EARLY_STOPPING_ROUNDS == 100
+
+
+class TestFoldEvaluationBackend:
+    def test_prefers_process_backend_when_available(self, monkeypatch) -> None:
+        dataset_bundle: Any = object()
+        folds = [
+            WalkForwardFold(
+                index=1,
+                weight=1.0,
+                train_indices=np.asarray([0, 1], dtype=np.int64),
+                validation_indices=np.asarray([2], dtype=np.int64),
+                train_end_date=pd.Timestamp("2019-01-01"),
+                validation_start_date=pd.Timestamp("2019-01-02"),
+                validation_end_date=pd.Timestamp("2019-01-02"),
+                train_row_count=2,
+                validation_row_count=1,
+            ),
+            WalkForwardFold(
+                index=2,
+                weight=2.0,
+                train_indices=np.asarray([0, 1, 2], dtype=np.int64),
+                validation_indices=np.asarray([3], dtype=np.int64),
+                train_end_date=pd.Timestamp("2019-01-02"),
+                validation_start_date=pd.Timestamp("2019-01-03"),
+                validation_end_date=pd.Timestamp("2019-01-03"),
+                train_row_count=3,
+                validation_row_count=1,
+            ),
+        ]
+        calls: list[str] = []
+
+        monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: True)
+        monkeypatch.setattr(
+            optimize_main,
+            "_install_process_fold_context",
+            lambda dataset_bundle, booster_params, optimization_config: calls.append("install"),
+        )
+        monkeypatch.setattr(
+            optimize_main,
+            "_clear_process_fold_context",
+            lambda: calls.append("clear"),
+        )
+        monkeypatch.setattr(
+            optimize_main,
+            "_evaluate_trial_folds_in_process_pool",
+            lambda folds, *, parallelism_plan: [{"fold_index": 2}, {"fold_index": 1}],
+        )
+        monkeypatch.setattr(
+            optimize_main,
+            "_evaluate_trial_folds_in_thread_pool",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("thread backend should not be used")),
+        )
+
+        results = optimize_main._evaluate_trial_folds(
+            dataset_bundle,
+            folds,
+            {"eta": 0.03},
+            OptimizationConfig(),
+            resolve_parallelism(total_cores=4, fold_count=2),
+        )
+
+        assert results == [{"fold_index": 2}, {"fold_index": 1}]
+        assert calls == ["install", "clear"]
+
+    def test_falls_back_to_thread_backend_when_process_backend_is_unavailable(self, monkeypatch) -> None:
+        dataset_bundle: Any = object()
+        folds = [
+            WalkForwardFold(
+                index=1,
+                weight=1.0,
+                train_indices=np.asarray([0, 1], dtype=np.int64),
+                validation_indices=np.asarray([2], dtype=np.int64),
+                train_end_date=pd.Timestamp("2019-01-01"),
+                validation_start_date=pd.Timestamp("2019-01-02"),
+                validation_end_date=pd.Timestamp("2019-01-02"),
+                train_row_count=2,
+                validation_row_count=1,
+            ),
+            WalkForwardFold(
+                index=2,
+                weight=2.0,
+                train_indices=np.asarray([0, 1, 2], dtype=np.int64),
+                validation_indices=np.asarray([3], dtype=np.int64),
+                train_end_date=pd.Timestamp("2019-01-02"),
+                validation_start_date=pd.Timestamp("2019-01-03"),
+                validation_end_date=pd.Timestamp("2019-01-03"),
+                train_row_count=3,
+                validation_row_count=1,
+            ),
+        ]
+
+        monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: False)
+        monkeypatch.setattr(
+            optimize_main,
+            "_evaluate_trial_folds_in_thread_pool",
+            lambda dataset_bundle, folds, booster_params, optimization_config, *, parallelism_plan: [{"fold_index": 1}],
+        )
+
+        results = optimize_main._evaluate_trial_folds(
+            dataset_bundle,
+            folds,
+            {"eta": 0.03},
+            OptimizationConfig(),
+            resolve_parallelism(total_cores=4, fold_count=2),
+        )
+
+        assert results == [{"fold_index": 1}]
 
 
 class _RecordingTrial:
@@ -342,6 +498,9 @@ class _FakeDMatrix:
         self.label = label
         self.feature_names = feature_names or []
 
+    def get_label(self) -> Any:
+        return self.label
+
 
 class _FakeCallbackModule:
     @staticmethod
@@ -360,18 +519,25 @@ class _FakeXGBoostModule:
         dtrain: _FakeDMatrix,
         num_boost_round: int,
         evals: list[tuple[_FakeDMatrix, str]],
+        custom_metric: Any,
+        maximize: bool,
         evals_result: dict[str, dict[str, list[float]]],
         callbacks: list[Any],
         verbose_eval: bool,
     ) -> _FakeBooster:
-        del dtrain, callbacks, verbose_eval
+        del dtrain, callbacks, verbose_eval, maximize
         validation_matrix = evals[0][0]
         score = float(
-            abs(float(params["eta"]) - 0.03)
-            + 0.01 * int(params["max_depth"])
-            + float(validation_matrix.label.mean())
+            0.15
+            - abs(float(params["eta"]) - 0.03)
+            - 0.01 * int(params["max_depth"])
+            - 0.001 * float(validation_matrix.label.mean())
         )
-        evals_result["validation"] = {"rmse": [score]}
+        metric_name, metric_value = custom_metric(
+            np.full_like(validation_matrix.label, fill_value=score, dtype=float),
+            validation_matrix,
+        )
+        evals_result["validation"] = {metric_name: [metric_value]}
         return _FakeBooster(best_score=score, best_iteration=min(num_boost_round, 12 + int(params["max_depth"])))
 
 
@@ -491,11 +657,16 @@ class TestOptimizeXGBoostParametersIntegration:
         monkeypatch.setattr(optimize_main, "load_optuna_module", lambda: fake_optuna)
         monkeypatch.setattr(optimize_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
         monkeypatch.setattr(optimize_main, "save_optimization_outputs", _capture_outputs)
+        monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: False)
 
-        trials_frame, best_payload = optimize_main.optimize_xgboost_parameters(dataset_path)
+        trials_frame, best_payload = optimize_main.optimize_xgboost_parameters(
+            dataset_path,
+            optimization_config=OptimizationConfig(trial_count=2, fold_count=5, target_horizon_days=1),
+        )
 
         assert len(trials_frame) == 2
-        assert "fold_1_rmse" in trials_frame.columns
+        assert "fold_1_daily_rank_ic" in trials_frame.columns
+        assert "mean_daily_rank_ic" in trials_frame.columns
         assert "objective_standard_error" in trials_frame.columns
         assert "selected_trial_one_standard_error" in best_payload
         assert best_payload["selected_trial_one_standard_error"]["trial_number"] in {0, 1}
@@ -550,9 +721,11 @@ class TestOptimizeXGBoostParametersIntegration:
         monkeypatch.setattr(optimize_main, "load_optuna_module", lambda: fake_optuna)
         monkeypatch.setattr(optimize_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
         monkeypatch.setattr(optimize_main, "save_optimization_outputs", _capture_outputs)
+        monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: False)
 
         optimize_main.optimize_xgboost_parameters(
             dataset_path,
+            optimization_config=OptimizationConfig(trial_count=1, fold_count=5, target_horizon_days=1),
             study_name="secondary_future_trend_5d",
             trials_parquet_path=trials_parquet_path,
             trials_csv_path=trials_csv_path,

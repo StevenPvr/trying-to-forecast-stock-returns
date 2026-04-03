@@ -24,7 +24,7 @@ def _as_timestamp(value: str | pd.Timestamp) -> pd.Timestamp:
     timestamp = pd.Timestamp(value)
     if pd.isna(timestamp):
         raise ValueError(f"Invalid timestamp value: {value!r}")
-    return cast(pd.Timestamp, timestamp)
+    return timestamp
 
 # ---------------------------------------------------------------------------
 # FOMC statement release dates 2004-2025 (historical facts)
@@ -156,15 +156,11 @@ def _get_quad_witching_dates(
 
 def _third_friday(year: int, month: int) -> pd.Timestamp:
     """Return the 3rd Friday of the given year/month."""
-    first_day: pd.Timestamp = _as_timestamp(
-        cast(pd.Timestamp, pd.Timestamp(year=year, month=month, day=1)),
-    )
+    first_day: pd.Timestamp = _as_timestamp(pd.Timestamp(year=year, month=month, day=1))
     weekday: int = first_day.weekday()  # Monday=0 ... Friday=4
     first_friday_offset: int = (4 - weekday) % 7
     third_friday_day: int = 1 + first_friday_offset + 14
-    return _as_timestamp(
-        cast(pd.Timestamp, pd.Timestamp(year=year, month=month, day=third_friday_day)),
-    )
+    return _as_timestamp(pd.Timestamp(year=year, month=month, day=third_friday_day))
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import datetime as dt
+import json
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -227,7 +228,11 @@ class TestPipelineConfig:
         assert config.ticker_aliases_csv is None
         assert config.membership_history_csv is None
         assert config.fundamentals_history_csv is None
-        assert config.allow_current_constituents_snapshot is True
+        assert config.xtb_only is False
+        assert config.xtb_instrument_specs_json is None
+        assert config.require_xtb_snapshot is False
+        assert config.xtb_max_spread_bps is None
+        assert config.allow_current_constituents_snapshot is False
 
     def test_frozen(self) -> None:
         config: PipelineConfig = PipelineConfig()
@@ -318,33 +323,33 @@ def _make_mock_ohlcv_df(index: pd.DatetimeIndex) -> pd.DataFrame:
 
 
 class TestBuildDataset:
-    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_all_fundamentals")
-    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_constituents")
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_membership_history")
     @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_prices")
     def test_basic_flow(
         self,
         mock_fetch: MagicMock,
-        mock_constituents: MagicMock,
-        mock_fundamentals: MagicMock,
+        mock_membership_history: MagicMock,
     ) -> None:
-        mock_constituents.return_value = {"AAPL", "MSFT"}
+        mock_membership_history.return_value = pd.DataFrame({
+            "ticker": ["AAPL", "MSFT"],
+            "start_date": pd.to_datetime(["2020-01-06", "2020-01-06"]),
+            "end_date": pd.to_datetime(["2020-01-10", "2020-01-10"]),
+        })
 
         index: pd.DatetimeIndex = pd.bdate_range("2020-01-06", "2020-01-10")
         mock_fetch.return_value = {
             "AAPL": _make_mock_ohlcv_df(index),
             "MSFT": _make_mock_ohlcv_df(index),
         }
-        mock_fundamentals.return_value = pd.DataFrame({
-            "ticker": ["AAPL", "MSFT"],
-            "sector": ["Technology", "Technology"],
-        })
 
         config: PipelineConfig = PipelineConfig(
             start_date="2020-01-06",
             end_date="2020-01-10",
-            allow_current_constituents_snapshot=True,
+            membership_history_csv=Path("/tmp/membership.csv"),
+            fundamentals_history_csv=Path("/tmp/fundamentals.csv"),
         )
-        result: pd.DataFrame = build_dataset(config)
+        with patch.object(Path, "exists", return_value=False):
+            result = build_dataset(config)
 
         assert "date" in result.columns
         assert "ticker" in result.columns
@@ -354,33 +359,132 @@ class TestBuildDataset:
         assert len(result) == 10
         assert list(result["ticker"]) == ["AAPL", "MSFT"] * 5
 
-    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_all_fundamentals")
-    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_constituents")
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_membership_history")
     @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_prices")
     def test_no_data_raises(
         self,
         mock_fetch: MagicMock,
-        mock_constituents: MagicMock,
-        mock_fundamentals: MagicMock,
+        mock_membership_history: MagicMock,
     ) -> None:
-        mock_constituents.return_value = {"AAPL"}
+        mock_membership_history.return_value = pd.DataFrame({
+            "ticker": ["AAPL"],
+            "start_date": pd.to_datetime(["2020-01-06"]),
+            "end_date": pd.to_datetime(["2020-01-10"]),
+        })
         mock_fetch.return_value = {}
 
         config: PipelineConfig = PipelineConfig(
             start_date="2020-01-06",
             end_date="2020-01-10",
-            allow_current_constituents_snapshot=True,
+            membership_history_csv=Path("/tmp/membership.csv"),
+            fundamentals_history_csv=Path("/tmp/fundamentals.csv"),
         )
-        with pytest.raises(RuntimeError, match="No price data"):
+        with (
+            patch.object(Path, "exists", return_value=False),
+            pytest.raises(RuntimeError, match="No price data"),
+        ):
             build_dataset(config)
 
-    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_constituents")
-    def test_no_constituents_raises(self, mock_constituents: MagicMock) -> None:
-        mock_constituents.return_value = set()
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_membership_history")
+    def test_no_constituents_raises(self, mock_membership_history: MagicMock) -> None:
+        mock_membership_history.return_value = pd.DataFrame(
+            columns=["ticker", "start_date", "end_date"],
+        )
         config: PipelineConfig = PipelineConfig(
-            allow_current_constituents_snapshot=True,
+            membership_history_csv=Path("/tmp/membership.csv"),
+            fundamentals_history_csv=Path("/tmp/fundamentals.csv"),
         )
         with pytest.raises(RuntimeError, match="No constituents"):
+            build_dataset(config)
+
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_membership_history")
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline._fetch_prices")
+    def test_xtb_only_filters_fetching_to_explicit_tradable_symbols(
+        self,
+        mock_fetch: MagicMock,
+        mock_membership_history: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        membership_history = pd.DataFrame({
+            "ticker": ["AAPL", "MSFT"],
+            "start_date": pd.to_datetime(["2020-01-06", "2020-01-06"]),
+            "end_date": pd.to_datetime(["2020-01-10", "2020-01-10"]),
+        })
+        mock_membership_history.return_value = membership_history
+
+        index: pd.DatetimeIndex = pd.bdate_range("2020-01-06", "2020-01-10")
+        mock_fetch.return_value = {"AAPL": _make_mock_ohlcv_df(index)}
+
+        fundamentals_path = tmp_path / "fundamentals.csv"
+        fundamentals_path.write_text(
+            "date,ticker,company_market_cap_usd\n2020-01-03,AAPL,100\n"
+        )
+        xtb_specs_path = tmp_path / "xtb_instrument_specs.json"
+        xtb_specs_path.write_text(
+            json.dumps([
+                {
+                    "symbol": "AAPL",
+                    "instrument_group": "stock_cfd",
+                    "currency": "USD",
+                    "spread_bps": 25.0,
+                    "slippage_bps": 5.0,
+                    "long_swap_bps_daily": 2.0,
+                    "short_swap_bps_daily": 1.0,
+                    "margin_requirement": 0.20,
+                    "max_adv_participation": 0.05,
+                    "effective_from": "2000-01-01",
+                    "effective_to": None,
+                },
+            ]),
+            encoding="utf-8",
+        )
+
+        config = PipelineConfig(
+            start_date="2020-01-06",
+            end_date="2020-01-10",
+            membership_history_csv=tmp_path / "membership.csv",
+            fundamentals_history_csv=fundamentals_path,
+            xtb_only=True,
+            xtb_instrument_specs_json=xtb_specs_path,
+            require_xtb_snapshot=True,
+        )
+
+        result = build_dataset(config)
+
+        mock_fetch.assert_called_once_with(
+            ["AAPL"],
+            "2020-01-06",
+            "2020-01-10",
+            config,
+        )
+        assert result["ticker"].unique().tolist() == ["AAPL"]
+
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.load_membership_history")
+    def test_xtb_only_requires_snapshot_when_enabled(
+        self,
+        mock_membership_history: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        mock_membership_history.return_value = pd.DataFrame({
+            "ticker": ["AAPL"],
+            "start_date": pd.to_datetime(["2020-01-06"]),
+            "end_date": pd.to_datetime(["2020-01-10"]),
+        })
+        fundamentals_path = tmp_path / "fundamentals.csv"
+        fundamentals_path.write_text(
+            "date,ticker,company_market_cap_usd\n2020-01-03,AAPL,100\n"
+        )
+        config = PipelineConfig(
+            start_date="2020-01-06",
+            end_date="2020-01-10",
+            membership_history_csv=tmp_path / "membership.csv",
+            fundamentals_history_csv=fundamentals_path,
+            xtb_only=True,
+            xtb_instrument_specs_json=tmp_path / "missing_xtb_specs.json",
+            require_xtb_snapshot=True,
+        )
+
+        with pytest.raises(FileNotFoundError, match="XTB instrument specification"):
             build_dataset(config)
 
 

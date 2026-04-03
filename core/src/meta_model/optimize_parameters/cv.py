@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -60,8 +59,8 @@ def build_walk_forward_folds(
 
     folds: list[WalkForwardFold] = []
     for fold_index, validation_dates_chunk in enumerate(validation_date_chunks, start=1):
-        validation_start = cast(pd.Timestamp, pd.Timestamp(validation_dates_chunk[0]))
-        validation_end = cast(pd.Timestamp, pd.Timestamp(validation_dates_chunk[-1]))
+        validation_start = pd.Timestamp(validation_dates_chunk[0])
+        validation_end = pd.Timestamp(validation_dates_chunk[-1])
         expanding_train_mask = train_mask | (
             validation_mask & (ordered[DATE_COLUMN] < validation_start)
         )
@@ -76,7 +75,7 @@ def build_walk_forward_folds(
         validation_indices = np.flatnonzero(fold_validation_mask.to_numpy())
         if train_indices.size == 0 or validation_indices.size == 0:
             raise ValueError(f"Fold {fold_index} produced an empty train or validation block.")
-        train_end_date = cast(pd.Timestamp, ordered.loc[train_indices, DATE_COLUMN].max())
+        train_end_date = pd.Timestamp(ordered.loc[train_indices, DATE_COLUMN].max())
         folds.append(
             WalkForwardFold(
                 index=fold_index,

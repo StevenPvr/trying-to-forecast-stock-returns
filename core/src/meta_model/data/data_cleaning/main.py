@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import cast
 
 import pandas as pd
 
@@ -42,8 +41,8 @@ def log_nan_report(df: pd.DataFrame, stage: str) -> None:
     LOGGER.info("[%s] Total NaN: %d", stage, total_nan)
     if total_nan == 0 or n_rows == 0:
         return
-    nan_per_col = cast(pd.Series, df.isna().sum())
-    cols_with_nan = cast(pd.Series, nan_per_col[nan_per_col > 0])
+    nan_per_col: pd.Series = df.isna().sum()
+    cols_with_nan: pd.Series = nan_per_col[nan_per_col > 0]
     for col, count in cols_with_nan.items():
         pct: float = 100.0 * count / n_rows
         LOGGER.info("[%s]   %s: %d NaN (%.1f%%)", stage, col, count, pct)
@@ -59,15 +58,10 @@ def log_nan_report_by_ticker(df: pd.DataFrame, stage: str) -> None:
     ]
     if not numeric_cols:
         return
-    nan_by_ticker = cast(
-        pd.Series,
-        df.groupby("ticker")[numeric_cols]
-        .apply(lambda g: 100.0 * g.isna().sum().sum() / g.size),
+    nan_by_ticker: pd.Series = df.groupby("ticker")[numeric_cols].apply(
+        lambda g: 100.0 * g.isna().sum().sum() / g.size,
     )
-    nan_by_ticker = cast(
-        pd.Series,
-        nan_by_ticker[nan_by_ticker > 0],
-    ).sort_values(ascending=False)
+    nan_by_ticker = nan_by_ticker[nan_by_ticker > 0].sort_values(ascending=False)
     LOGGER.info(
         "[%s] %d / %d tickers with missing data:",
         stage, len(nan_by_ticker), df["ticker"].nunique(),
@@ -114,7 +108,7 @@ def _find_quasi_constant_columns(
 ) -> list[str]:
     quasi_constant_columns: list[str] = []
     for col in candidate_columns:
-        series = cast(pd.Series, df[col])
+        series: pd.Series = df[col]
         if _is_binary_indicator(series):
             continue
         value_counts: pd.Series = series.value_counts(dropna=False)
@@ -138,12 +132,11 @@ def finalize_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:
 
     if "data_error_flag" in finalized.columns:
         initial_rows: int = len(finalized)
-        finalized = cast(
-            pd.DataFrame,
-            finalized.loc[
-                ~cast(pd.Series, finalized["data_error_flag"]).astype(bool),
-            ].copy(),
-        )
+        error_flag_series: pd.Series = finalized["data_error_flag"]
+        filtered: pd.DataFrame = finalized.loc[
+            ~error_flag_series.astype(bool)
+        ].copy()
+        finalized = filtered
         dropped_rows: int = initial_rows - len(finalized)
         LOGGER.info(
             "Filtered out %d rows flagged as data errors (%d -> %d).",
@@ -171,7 +164,8 @@ def finalize_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:
         if col in finalized.columns
     ]
     if columns_to_drop:
-        finalized = finalized.drop(columns=columns_to_drop)
+        dropped_outlier_columns: pd.DataFrame = finalized.drop(columns=columns_to_drop)
+        finalized = dropped_outlier_columns
         LOGGER.info(
             "Dropped non-modeling outlier columns: %s",
             ", ".join(columns_to_drop),
@@ -187,7 +181,8 @@ def finalize_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:
         if finalized[col].nunique(dropna=False) <= 1
     ]
     if constant_columns:
-        finalized = finalized.drop(columns=constant_columns)
+        dropped_constant_columns: pd.DataFrame = finalized.drop(columns=constant_columns)
+        finalized = dropped_constant_columns
         LOGGER.info(
             "Dropped constant modeling columns: %s",
             ", ".join(constant_columns),
@@ -201,7 +196,10 @@ def finalize_modeling_dataset(df: pd.DataFrame) -> pd.DataFrame:
         candidate_columns,
     )
     if quasi_constant_columns:
-        finalized = finalized.drop(columns=quasi_constant_columns)
+        dropped_quasi_constant_columns: pd.DataFrame = finalized.drop(
+            columns=quasi_constant_columns,
+        )
+        finalized = dropped_quasi_constant_columns
         LOGGER.info(
             "Dropped quasi-constant modeling columns (>= %.3f dominant share): %s",
             _QUASI_CONSTANT_SHARE_THRESHOLD,

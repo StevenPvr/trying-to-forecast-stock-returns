@@ -5,17 +5,22 @@ import logging
 import pandas as pd
 
 from core.src.meta_model.features_engineering.config import (
+    BROKER_FEATURE_PREFIX,
     CALENDAR_FEATURE_PREFIX,
     CALENDAR_SINCE_LAG_WINDOWS,
     COMPANY_FEATURE_LAG_WINDOWS,
     COMPANY_FEATURE_PREFIX,
     CROSS_ASSET_FEATURE_PREFIX,
     DEEP_FEATURE_PREFIX,
+    EARNINGS_FEATURE_PREFIX,
     FEATURE_LAG_WINDOWS,
     MACRO_FEATURE_PREFIX,
     NON_LAGGABLE_QUANT_FEATURES,
     NON_LAGGABLE_TA_PREFIXES,
+    OPEN_FEATURE_PREFIX,
     QUANT_FEATURE_PREFIX,
+    SECTOR_FEATURE_PREFIX,
+    SIGNAL_FEATURE_PREFIX,
     SENTIMENT_FEATURE_PREFIX,
     SLOW_FEATURE_LAG_WINDOWS,
     STOCK_LOG_RETURN_COLUMNS,
@@ -46,6 +51,16 @@ def get_lag_windows_for_feature(column: str) -> tuple[int, ...]:
         return FEATURE_LAG_WINDOWS
     if column.startswith(DEEP_FEATURE_PREFIX):
         return FEATURE_LAG_WINDOWS
+    if column.startswith(BROKER_FEATURE_PREFIX):
+        return FEATURE_LAG_WINDOWS
+    if column.startswith(SECTOR_FEATURE_PREFIX):
+        return FEATURE_LAG_WINDOWS
+    if column.startswith(OPEN_FEATURE_PREFIX):
+        return FEATURE_LAG_WINDOWS
+    if column.startswith(EARNINGS_FEATURE_PREFIX):
+        return FEATURE_LAG_WINDOWS
+    if column.startswith(SIGNAL_FEATURE_PREFIX):
+        return FEATURE_LAG_WINDOWS
     if column.startswith(CROSS_ASSET_FEATURE_PREFIX):
         return FEATURE_LAG_WINDOWS
     if column.startswith(COMPANY_FEATURE_PREFIX):
@@ -61,8 +76,24 @@ def get_lag_windows_for_feature(column: str) -> tuple[int, ...]:
     return ()
 
 
-def get_laggable_feature_columns(columns: list[str] | pd.Index) -> list[str]:
-    return [column for column in columns if get_lag_windows_for_feature(column)]
+def _is_numeric_feature_column(data: pd.DataFrame, column: str) -> bool:
+    if column not in data.columns:
+        return False
+    return bool(pd.api.types.is_numeric_dtype(data[column]))
+
+
+def get_laggable_feature_columns(
+    columns: list[str] | pd.Index,
+    data: pd.DataFrame | None = None,
+) -> list[str]:
+    laggable_columns = [column for column in columns if get_lag_windows_for_feature(column)]
+    if data is None:
+        return laggable_columns
+    return [
+        column
+        for column in laggable_columns
+        if _is_numeric_feature_column(data, column)
+    ]
 
 
 def downcast_numeric_columns(data: pd.DataFrame) -> pd.DataFrame:
@@ -84,8 +115,13 @@ def build_lagged_feature_group(
     selected_laggable_columns: list[str] = (
         laggable_columns
         if laggable_columns is not None
-        else get_laggable_feature_columns(list(lagged_data.columns))
+        else get_laggable_feature_columns(list(lagged_data.columns), lagged_data)
     )
+    selected_laggable_columns = [
+        column
+        for column in selected_laggable_columns
+        if _is_numeric_feature_column(lagged_data, column)
+    ]
 
     if not selected_laggable_columns:
         return lagged_data.sort_values(["date", "ticker"]).reset_index(drop=True)
@@ -115,7 +151,7 @@ def add_feature_lags(data: pd.DataFrame) -> pd.DataFrame:
         return build_lagged_feature_group(data)
 
     lagged_groups: list[pd.DataFrame] = []
-    laggable_columns: list[str] = get_laggable_feature_columns(list(data.columns))
+    laggable_columns: list[str] = get_laggable_feature_columns(list(data.columns), data)
     for _, group in data.groupby("ticker", sort=False):
         lagged_groups.append(
             build_lagged_feature_group(group, laggable_columns=laggable_columns),

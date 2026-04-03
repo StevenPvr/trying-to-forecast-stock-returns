@@ -8,5 +8,7 @@
 __pycache__/
 *.pyc
 .mcp.json
+.codex/
+tmp_feature_selection_trace/
 
 core/data/

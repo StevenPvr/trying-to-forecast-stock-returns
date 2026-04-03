@@ -22,6 +22,11 @@ dependencies = [
 	"catboost>=1.2.10",
 	"xgboost>=2.1.0",
 	"optuna>=4.2.0",
+	"lightgbm>=4.6.0",
+	"scikit-learn>=1.8.0",
+	"pypdf>=6.9.2",
+	"wrds>=3.1.6",
+	"fork>=0.1",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +36,6 @@ dev = [
 	"types-requests>=2.31",
 	"types-pytz>=2024.1",
 ]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"

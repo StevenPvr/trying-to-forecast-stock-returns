@@ -1,6 +1,6 @@
 # Bonnes Pratiques -- prevision-sp500
 
-> Document de reference pour le projet de prevision du S&P 500.
+> Document de reference pour le projet de prevision du S&P 500 / pipeline XTB CFD.
 > Chaque regle est concrete et actionnable. Les exemples DO/DON'T s'appuient sur le code existant.
 
 ---
@@ -73,11 +73,15 @@ def build_dataset(config: PipelineConfig) -> pd.DataFrame:
 
 | Etape | Module | Entree | Sortie |
 |---|---|---|---|
-| Fetching | `data_fetching/` | API yfinance/stooq | `raw_prices.parquet` |
-| Cleaning | `data_cleaning/` | `raw_prices.parquet` | `clean_prices.parquet` |
-| Preprocessing | `data_preprocessing/` | `clean_prices.parquet` | `features.parquet` |
-| Modeling | `models/` (futur) | `features.parquet` | predictions |
-| Evaluation | `evaluation/` (futur) | predictions + realise | metriques |
+| Broker snapshot | `core/src/meta_model/broker_xtb/` | PDF XTB officiel | `core/data/reference/xtb/xtb_instrument_specs.json` |
+| Reference data | `core/src/meta_model/data/data_reference/` | WRDS / bootstrap public | `core/data/reference/*.csv` |
+| Fetching | `core/src/meta_model/data/data_fetching/` | Références PIT + providers marché/date-level | `core/data/data_fetching/dataset_2004_2025.parquet` |
+| Cleaning | `core/src/meta_model/data/data_cleaning/` | `dataset_2004_2025.parquet` | `dataset_cleaned_2004_2025.parquet` |
+| Features | `core/src/meta_model/features_engineering/` | `dataset_cleaned_2004_2025.parquet` | `dataset_features_2004_2025.parquet` |
+| Preprocessing | `core/src/meta_model/data/data_preprocessing/` | `dataset_features_2004_2025.parquet` | `dataset_preprocessed_2009_2025.parquet` |
+| Feature selection | `core/src/meta_model/feature_selection/` | `dataset_preprocessed_2009_2025.parquet` | `dataset_preprocessed_feature_selected.parquet` |
+| Optimize | `core/src/meta_model/optimize_parameters/` | dataset filtré | `trial_ledger.parquet`, `overfitting_report.json` |
+| Evaluate | `core/src/meta_model/evaluate/` | prédictions + labels + contraintes portefeuille | métriques, backtests, exports manuels |
 
 Chaque etape lit un fichier et en produit un autre. Ne pas tout mettre dans une seule fonction.
 
@@ -455,6 +459,23 @@ df = prices.merge(macro, on="date")
 
 ## 5. Regles specifiques au projet
 
+### 5.0 Etat courant du repo
+
+- Le seul pipeline supporté est le pipeline `meta_model` XTB-first.
+- Les couches legacy `secondary_model`, `feature_corr_pca` et `feature_selection_lag` ne font plus partie du canonique.
+- Les artefacts runtime vivent dans `core/data/` et ce dossier est gitignoré.
+- Le bootstrap canonique avant un vrai run est:
+  1. `core/src/meta_model/broker_xtb/main.py`
+  2. `core/src/meta_model/data/data_reference/main.py`
+  3. `core/src/meta_model/launch/main.py`
+  4. puis la chaîne `data_fetching -> data_cleaning -> features_engineering -> data_preprocessing -> feature_selection -> optimize_parameters -> evaluate`
+- `data_fetching` est broker-aware:
+  - univers PIT S&P 500 intersecté avec les `stock_cfd` XTB,
+  - fondamentaux PIT depuis WRDS direct si `ID_WRDS` / `PASSWORD_WRDS` existent,
+  - fallback prix `yfinance -> stooq -> Tiingo`.
+- Les warnings `possibly delisted; no timezone found` venant de `yfinance` sont attendus sur certains anciens symboles; le pipeline continue avec les fallbacks puis élimine les tickers trop incomplets.
+- `launch/main.py` est le juge officiel de readiness minimale, pas une promesse que tous les étages aval ont été rerun dans la session en cours.
+
 ### 5.1 Convention de nommage des fichiers
 
 ```
@@ -504,17 +525,17 @@ Le pipeline zero-fill (`_apply_delisting_zero`) met le prix a 0.0 apres la derni
 **Chaque module/etape du pipeline doit avoir un fichier `main.py`** qui sert de point d'entree unique. Ce fichier doit etre directement executable en cliquant dessus dans l'IDE (pas besoin de terminal).
 
 ```python
-# core/src/data/data_fetching/main.py
+# core/src/meta_model/data/data_fetching/main.py
 
 import sys
 from pathlib import Path
 
 # Remonter jusqu'a la racine du projet pour que tous les imports fonctionnent
-PROJECT_ROOT = Path(__file__).resolve().parents[4]  # adapte selon la profondeur
+PROJECT_ROOT = Path(__file__).resolve().parents[5]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.src.data.data_fetching.sp500_pipeline import PipelineConfig, run_pipeline
+from core.src.meta_model.data.data_fetching.sp500_pipeline import PipelineConfig, run_pipeline
 
 def main() -> None:
     config = PipelineConfig()
@@ -553,17 +574,17 @@ def main() -> None:
 
 ### 5.5 Fichiers `paths.py` et `constants.py`
 
-Ces fichiers se placent **a la racine du dossier parent** (profondeur 2), pas dans chaque sous-module. Par exemple `core/src/data/paths.py` et `core/src/data/constants.py` pour tout le pipeline data.
+Ces fichiers se placent **a la racine du module data actif**. Pour le pipeline canonique actuel: `core/src/meta_model/data/paths.py` et `core/src/meta_model/data/constants.py`.
 
 **`paths.py`** -- centralise tous les chemins du pipeline.
 
 ```python
-# core/src/data/paths.py
+# core/src/meta_model/data/paths.py
 
 from __future__ import annotations
 from pathlib import Path
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[3]
+PROJECT_ROOT: Path = Path(__file__).resolve().parents[4]
 CORE_DIR: Path = PROJECT_ROOT / "core"
 DATA_DIR: Path = CORE_DIR / "data"
 
@@ -578,7 +599,7 @@ DATA_PREPROCESSING_DIR: Path = DATA_DIR / "data_preprocessing"
 **`constants.py`** -- centralise les constantes metier reutilisables.
 
 ```python
-# core/src/data/constants.py
+# core/src/meta_model/data/constants.py
 
 from __future__ import annotations
 
@@ -696,6 +717,7 @@ if __name__ == "__main__":
 [ ] Le schema du DataFrame de sortie est documente et valide
 [ ] Le logging trace le nombre de lignes a chaque etape
 [ ] Les fichiers de donnees ne sont pas commites dans git
+[ ] Si le changement touche le bootstrap, `broker_xtb/main.py`, `data_reference/main.py` ou `launch/main.py` ont ete verifies
 [ ] Chaque nouveau fichier source a son fichier de test miroir
 [ ] Les main.py et fichiers de test sont directement executables (sys.path + __main__)
 [ ] Les chemins passent par paths.py, les constantes par constants.py

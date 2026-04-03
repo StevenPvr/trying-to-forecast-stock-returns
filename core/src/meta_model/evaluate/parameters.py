@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,65 @@ class SelectedXGBoostConfiguration:
     training_rounds: int
 
 
+def _load_json_object(path: Path) -> dict[str, object]:
+    payload: object = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected JSON object in {path}.")
+    raw_payload = cast(dict[object, object], payload)
+    items: list[tuple[object, object]] = list(raw_payload.items())
+    return {str(key): value for key, value in items}
+
+
+def _normalize_params(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Selected trial params must be a JSON object.")
+    raw_params = cast(dict[object, object], payload)
+    items: list[tuple[object, object]] = list(raw_params.items())
+    return {str(key): value for key, value in items}
+
+
+def _normalize_object_mapping(payload: object, *, error_message: str) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise ValueError(error_message)
+    raw_payload = cast(dict[object, object], payload)
+    items: list[tuple[object, object]] = list(raw_payload.items())
+    return {str(key): value for key, value in items}
+
+
+def _object_to_int(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, np.integer):
+        return int(cast(np.integer[Any], value))
+    if isinstance(value, str):
+        return int(value)
+    raise ValueError(f"{field_name} must be convertible to int.")
+
+
+def _select_trial_payload(payload: dict[str, object]) -> tuple[int, dict[str, Any]]:
+    best_trial_number = payload.get("best_trial_number")
+    best_params = payload.get("params")
+    if best_trial_number is not None and best_params is not None:
+        return (
+            _object_to_int(best_trial_number, field_name="best_trial_number"),
+            _normalize_params(best_params),
+        )
+
+    selected_payload = _normalize_object_mapping(
+        payload.get("selected_trial_one_standard_error"),
+        error_message="Optimization output does not include selected_trial_one_standard_error.",
+    )
+    return (
+        _object_to_int(
+            selected_payload["trial_number"],
+            field_name="selected_trial_one_standard_error.trial_number",
+        ),
+        _normalize_params(selected_payload["params"]),
+    )
+
+
 def load_selected_xgboost_configuration(
     best_params_path: Path = XGBOOST_OPTUNA_BEST_PARAMS_JSON,
     trials_path: Path = XGBOOST_OPTUNA_TRIALS_PARQUET,
@@ -30,14 +89,16 @@ def load_selected_xgboost_configuration(
     if not trials_path.exists():
         raise FileNotFoundError(f"Trials parquet not found: {trials_path}")
 
-    payload = json.loads(best_params_path.read_text(encoding="utf-8"))
-    selected_payload = payload.get("selected_trial_one_standard_error")
-    if not isinstance(selected_payload, dict):
-        raise ValueError("Optimization output does not include selected_trial_one_standard_error.")
-
-    selected_trial_number = int(selected_payload["trial_number"])
-    selected_params = dict(selected_payload["params"])
-    boost_rounds = int(payload["config"]["boost_rounds"])
+    payload = _load_json_object(best_params_path)
+    selected_trial_number, selected_params = _select_trial_payload(payload)
+    config_payload = _normalize_object_mapping(
+        payload.get("config"),
+        error_message="Optimization output does not include a valid config payload.",
+    )
+    boost_rounds = _object_to_int(
+        config_payload["boost_rounds"],
+        field_name="config.boost_rounds",
+    )
 
     trials = pd.read_parquet(trials_path)
     selected_trials = pd.DataFrame(
