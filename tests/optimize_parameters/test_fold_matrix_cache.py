@@ -16,7 +16,11 @@ from core.src.meta_model.optimize_parameters.config import OptimizationConfig
 from core.src.meta_model.optimize_parameters.cv import build_walk_forward_folds
 from core.src.meta_model.optimize_parameters.dataset import build_optimization_dataset_bundle
 from core.src.meta_model.optimize_parameters.fold_context import build_fold_evaluation_contexts
-from core.src.meta_model.optimize_parameters.fold_matrix_cache import build_fold_matrix_cache
+from core.src.meta_model.optimize_parameters.fold_matrix_cache import (
+    CachedFoldMatrixBundle,
+    CachedTrainWindowMatrix,
+    build_fold_matrix_cache,
+)
 
 
 class _FakeDMatrix:
@@ -56,7 +60,7 @@ def _make_preprocessed_df() -> pd.DataFrame:
 
 
 class TestFoldMatrixCache:
-    def test_uses_dmatrix_for_validation_and_quantile_for_train(
+    def test_returns_none_when_cupy_unavailable_to_avoid_host_ram_cache(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -82,14 +86,65 @@ class TestFoldMatrixCache:
             enabled=True,
         )
 
-        assert cache is not None
-        first_fold = cache[min(cache.keys())]
-        assert isinstance(first_fold.validation_matrix, _FakeDMatrix)
-        assert not isinstance(first_fold.validation_matrix, _FakeQuantileDMatrix)
-        assert all(
-            isinstance(window.train_matrix, _FakeQuantileDMatrix)
-            for window in first_fold.train_windows
+        assert cache is None
+
+    def test_returns_gpu_cache_when_gpu_builder_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        data = _make_preprocessed_df()
+        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        config = OptimizationConfig(fold_count=5, target_horizon_days=1)
+        folds = build_walk_forward_folds(
+            bundle.metadata,
+            fold_count=config.fold_count,
+            target_horizon_days=config.target_horizon_days,
         )
+        fold_contexts = build_fold_evaluation_contexts(bundle, folds, config)
+        sample_fold_context = fold_contexts[0]
+        fake_cache = {
+            sample_fold_context.fold.index: CachedFoldMatrixBundle(
+                fold_context=sample_fold_context,
+                validation_matrix=_FakeDMatrix([], []),
+                train_windows=[
+                    CachedTrainWindowMatrix(
+                        label="full",
+                        coverage_fraction=1.0,
+                        train_matrix=_FakeQuantileDMatrix([], []),
+                    ),
+                ],
+            ),
+        }
+
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.fold_matrix_cache._load_cupy_module",
+            lambda: object(),
+        )
+
+        def _gpu_builder(
+            dataset_bundle: Any,
+            fold_contexts: Any,
+            *,
+            xgb_module: Any,
+            cupy_module: Any,
+            gpu_device_id: int,
+        ) -> dict[int, CachedFoldMatrixBundle]:
+            del dataset_bundle, fold_contexts, xgb_module, cupy_module, gpu_device_id
+            return fake_cache
+
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.fold_matrix_cache._build_fold_matrix_cache_gpu_resident",
+            _gpu_builder,
+        )
+
+        cache = build_fold_matrix_cache(
+            bundle,
+            fold_contexts,
+            xgb_module=_FakeXGBoostModule(),
+            enabled=True,
+        )
+
+        assert cache is fake_cache
 
 
 if __name__ == "__main__":

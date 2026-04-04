@@ -7,8 +7,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-
 from core.src.meta_model.optimize_parameters.dataset import OptimizationDatasetBundle
 from core.src.meta_model.optimize_parameters.fold_context import FoldEvaluationContext
 
@@ -55,63 +53,6 @@ def _load_cupy_module() -> Any | None:
         return importlib.import_module("cupy")
     except Exception:
         return None
-
-
-def _build_fold_matrix_cache_host(
-    dataset_bundle: OptimizationDatasetBundle,
-    fold_contexts: list[FoldEvaluationContext],
-    *,
-    xgb_module: Any,
-) -> dict[int, CachedFoldMatrixBundle]:
-    cache_by_fold_index: dict[int, CachedFoldMatrixBundle] = {}
-    for fold_context in fold_contexts:
-        fold = fold_context.fold
-        validation_features = np.ascontiguousarray(
-            dataset_bundle.feature_matrix[fold.validation_indices],
-        )
-        validation_labels = np.ascontiguousarray(
-            dataset_bundle.target_array[fold.validation_indices],
-        )
-        validation_matrix = _build_dmatrix(
-            xgb_module,
-            validation_features,
-            validation_labels,
-            dataset_bundle.feature_columns,
-            prefer_quantile=False,
-        )
-        del validation_features
-        del validation_labels
-
-        cached_train_windows: list[CachedTrainWindowMatrix] = []
-        for train_window in fold_context.train_windows:
-            train_features = np.ascontiguousarray(
-                dataset_bundle.feature_matrix[train_window.train_indices],
-            )
-            train_labels = np.ascontiguousarray(
-                dataset_bundle.target_array[train_window.train_indices],
-            )
-            train_matrix = _build_dmatrix(
-                xgb_module,
-                train_features,
-                train_labels,
-                dataset_bundle.feature_columns,
-            )
-            cached_train_windows.append(
-                CachedTrainWindowMatrix(
-                    label=train_window.label,
-                    coverage_fraction=train_window.coverage_fraction,
-                    train_matrix=train_matrix,
-                ),
-            )
-            del train_features
-            del train_labels
-
-        cache_by_fold_index[fold.index] = CachedFoldMatrixBundle(
-            fold_context=fold_context,
-            validation_matrix=validation_matrix,
-            train_windows=cached_train_windows,
-        )
-    return cache_by_fold_index
 
 
 def _build_fold_matrix_cache_gpu_resident(
@@ -187,39 +128,31 @@ def build_fold_matrix_cache(
     if not enabled:
         return None
 
-    cache_backend = "host"
     cupy_module = _load_cupy_module()
-    if cupy_module is not None:
-        try:
-            cache_by_fold_index = _build_fold_matrix_cache_gpu_resident(
-                dataset_bundle,
-                fold_contexts,
-                xgb_module=xgb_module,
-                cupy_module=cupy_module,
-                gpu_device_id=gpu_device_id,
-            )
-            cache_backend = "gpu"
-        except Exception as error:
-            LOGGER.warning(
-                "CUDA resident fold matrix cache unavailable (%s); falling back to host cache.",
-                error,
-            )
-            cache_by_fold_index = _build_fold_matrix_cache_host(
-                dataset_bundle,
-                fold_contexts,
-                xgb_module=xgb_module,
-            )
-    else:
-        cache_by_fold_index = _build_fold_matrix_cache_host(
+    if cupy_module is None:
+        LOGGER.warning(
+            "CUDA fold matrix cache disabled: CuPy unavailable. Continuing without persistent fold cache to avoid host RAM amplification.",
+        )
+        return None
+
+    try:
+        cache_by_fold_index = _build_fold_matrix_cache_gpu_resident(
             dataset_bundle,
             fold_contexts,
             xgb_module=xgb_module,
+            cupy_module=cupy_module,
+            gpu_device_id=gpu_device_id,
         )
+    except Exception as error:
+        LOGGER.warning(
+            "CUDA fold matrix cache disabled (%s). Continuing without persistent fold cache to avoid host RAM amplification.",
+            error,
+        )
+        return None
 
     gc.collect()
     LOGGER.info(
-        "Built fold matrix cache for CUDA: backend=%s | folds=%d | cached_windows=%d",
-        cache_backend,
+        "Built fold matrix cache for CUDA: backend=gpu | folds=%d | cached_windows=%d",
         len(cache_by_fold_index),
         sum(len(bundle.train_windows) for bundle in cache_by_fold_index.values()),
     )

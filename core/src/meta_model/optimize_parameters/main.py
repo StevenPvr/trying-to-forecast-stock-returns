@@ -732,6 +732,14 @@ def optimize_xgboost_parameters(
         enabled=acceleration_plan.accelerator == "cuda" and acceleration_plan.use_gpu_matrix_cache,
         gpu_device_id=acceleration_plan.gpu_device_id,
     )
+    if (
+        acceleration_plan.accelerator == "cuda"
+        and acceleration_plan.use_gpu_matrix_cache
+        and fold_matrix_cache_by_index is None
+    ):
+        LOGGER.warning(
+            "CUDA persistent fold cache unavailable; running with on-the-fly matrix construction (stable RAM, lower cache reuse).",
+        )
     _log_optimization_plan(
         dataset_bundle,
         feature_columns,
