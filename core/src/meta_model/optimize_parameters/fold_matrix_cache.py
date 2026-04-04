@@ -94,6 +94,7 @@ def _build_fold_matrix_cache_gpu_resident(
                     train_features,
                     train_labels,
                     dataset_bundle.feature_columns,
+                    prefer_quantile=False,
                 )
                 cached_train_windows.append(
                     CachedTrainWindowMatrix(

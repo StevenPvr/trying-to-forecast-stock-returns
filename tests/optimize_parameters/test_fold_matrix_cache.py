@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -40,6 +41,35 @@ class _FakeXGBoostModule:
         setattr(self, "QuantileDMatrix", _FakeQuantileDMatrix)
 
 
+class _FakeCuPyDevice:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+
+
+class _FakeCuPyCuda:
+    @staticmethod
+    def Device(device_id: int) -> _FakeCuPyDevice:
+        del device_id
+        return _FakeCuPyDevice()
+
+
+class _FakeCuPyModule:
+    float32 = np.float32
+    int64 = np.int64
+    cuda = _FakeCuPyCuda()
+
+    @staticmethod
+    def asarray(data: Any, dtype: Any = None) -> np.ndarray:
+        return np.asarray(data, dtype=dtype)
+
+    @staticmethod
+    def take(array: Any, indices: Any, axis: int = 0) -> np.ndarray:
+        return np.take(np.asarray(array), np.asarray(indices), axis=axis)
+
+
 def _make_preprocessed_df() -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for split_name, start, periods in (
@@ -60,6 +90,38 @@ def _make_preprocessed_df() -> pd.DataFrame:
 
 
 class TestFoldMatrixCache:
+    def test_gpu_cache_uses_dmatrix_for_train_and_validation_to_keep_max_bin_dynamic(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        data = _make_preprocessed_df()
+        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        config = OptimizationConfig(fold_count=5, target_horizon_days=1)
+        folds = build_walk_forward_folds(
+            bundle.metadata,
+            fold_count=config.fold_count,
+            target_horizon_days=config.target_horizon_days,
+        )
+        fold_contexts = build_fold_evaluation_contexts(bundle, folds, config)
+
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.fold_matrix_cache._load_cupy_module",
+            lambda: _FakeCuPyModule(),
+        )
+
+        cache = build_fold_matrix_cache(
+            bundle,
+            fold_contexts,
+            xgb_module=_FakeXGBoostModule(),
+            enabled=True,
+        )
+
+        assert cache is not None
+        for cached_fold in cache.values():
+            assert type(cached_fold.validation_matrix) is _FakeDMatrix
+            for train_window in cached_fold.train_windows:
+                assert type(train_window.train_matrix) is _FakeDMatrix
+
     def test_returns_none_when_cupy_unavailable_to_avoid_host_ram_cache(
         self,
         monkeypatch: pytest.MonkeyPatch,
