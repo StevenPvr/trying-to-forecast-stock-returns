@@ -121,6 +121,8 @@ def resolve_acceleration_plan(
 ) -> AccelerationPlan:
     requested = normalize_requested_accelerator(config.compute_accelerator)
     cuda_flag = _extract_cuda_build_flag(xgb_module)
+    detected_gpu_name = _detect_nvidia_gpu_name(config.gpu_device_id)
+    has_detectable_nvidia_gpu = detected_gpu_name is not None
 
     if requested == "cpu":
         return AccelerationPlan(
@@ -135,6 +137,21 @@ def resolve_acceleration_plan(
     if cuda_flag is False and requested == "cuda":
         raise RuntimeError(
             "CUDA acceleration requested, but current xgboost build does not include CUDA support.",
+        )
+
+    if requested == "cuda" and not has_detectable_nvidia_gpu:
+        raise RuntimeError(
+            "CUDA acceleration requested, but no NVIDIA GPU was detected for the selected device_id.",
+        )
+
+    if requested == "auto" and not has_detectable_nvidia_gpu:
+        return AccelerationPlan(
+            requested_accelerator=requested,
+            accelerator="cpu",
+            gpu_device_id=config.gpu_device_id,
+            gpu_name=None,
+            reason="No NVIDIA GPU detected for selected device_id; using CPU fallback.",
+            use_gpu_matrix_cache=False,
         )
 
     cuda_available, cuda_error = _probe_cuda_training(xgb_module, config.gpu_device_id)
@@ -167,12 +184,11 @@ def resolve_acceleration_plan(
                 use_gpu_matrix_cache=False,
             )
 
-    gpu_name = _detect_nvidia_gpu_name(config.gpu_device_id)
     return AccelerationPlan(
         requested_accelerator=requested,
         accelerator="cuda",
         gpu_device_id=config.gpu_device_id,
-        gpu_name=gpu_name,
+        gpu_name=detected_gpu_name,
         reason="CUDA runtime probe succeeded.",
         use_gpu_matrix_cache=config.enable_gpu_matrix_cache,
     )

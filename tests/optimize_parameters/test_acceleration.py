@@ -74,12 +74,12 @@ class TestResolveAccelerationPlan:
             _cuda_build_flag,
         )
         monkeypatch.setattr(
-            "core.src.meta_model.optimize_parameters.acceleration._probe_cuda_training",
-            _cuda_probe,
-        )
-        monkeypatch.setattr(
             "core.src.meta_model.optimize_parameters.acceleration._detect_nvidia_gpu_name",
             _gpu_name,
+        )
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.acceleration._probe_cuda_training",
+            _cuda_probe,
         )
 
         plan = resolve_acceleration_plan(
@@ -91,6 +91,27 @@ class TestResolveAccelerationPlan:
         assert plan.gpu_name == "NVIDIA L40S"
         assert plan.use_gpu_matrix_cache is True
 
+    def test_auto_falls_back_to_cpu_when_no_nvidia_gpu_is_detected(self, monkeypatch: MonkeyPatch) -> None:
+        def _cuda_build_flag(_: Any) -> bool:
+            return True
+
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.acceleration._extract_cuda_build_flag",
+            _cuda_build_flag,
+        )
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.acceleration._detect_nvidia_gpu_name",
+            lambda _: None,
+        )
+
+        plan = resolve_acceleration_plan(
+            OptimizationConfig(compute_accelerator="auto"),
+            xgb_module=_FakeXGBoostModule(),
+        )
+
+        assert plan.accelerator == "cpu"
+        assert "No NVIDIA GPU detected" in plan.reason
+
     def test_forced_cuda_raises_when_probe_fails(self, monkeypatch: MonkeyPatch) -> None:
         def _cuda_build_flag(_: Any) -> bool:
             return True
@@ -101,6 +122,10 @@ class TestResolveAccelerationPlan:
         monkeypatch.setattr(
             "core.src.meta_model.optimize_parameters.acceleration._extract_cuda_build_flag",
             _cuda_build_flag,
+        )
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.acceleration._detect_nvidia_gpu_name",
+            lambda _: "NVIDIA L40S",
         )
         monkeypatch.setattr(
             "core.src.meta_model.optimize_parameters.acceleration._probe_cuda_training",

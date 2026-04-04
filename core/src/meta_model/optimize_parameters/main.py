@@ -64,7 +64,7 @@ from core.src.meta_model.optimize_parameters.search_space import (
 from core.src.meta_model.optimize_parameters.selection import select_one_standard_error_trial
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
-DEFAULT_OPTIMIZATION_DATASET_PATH: Path = Path("/teamspace/uploads/dataset_preprocessed_feature_selected.parquet")
+DEFAULT_OPTIMIZATION_DATASET_PATH: Path = FEATURE_SELECTION_FILTERED_DATASET_PARQUET
 _process_fold_dataset_bundle: OptimizationDatasetBundle | None = None
 _process_fold_booster_params: dict[str, Any] | None = None
 _process_fold_optimization_config: OptimizationConfig | None = None
