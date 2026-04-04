@@ -21,6 +21,7 @@ from core.src.meta_model.data.constants import (
     SAMPLE_FRAC,
     SECTOR_ETFS,
 )
+from core.src.meta_model.data.data_fetching.yfinance_download_lock import YFINANCE_DOWNLOAD_LOCK
 from core.src.meta_model.data.paths import DATA_FETCHING_DIR
 from core.src.meta_model.data.trading_calendar import get_nyse_sessions
 from core.src.meta_model.runtime_parallelism import resolve_executor_worker_count
@@ -81,15 +82,16 @@ def _fetch_cross_asset_batch(
     if yf is None:
         raise ImportError("yfinance is not installed")
 
-    raw: pd.DataFrame | None = yf.download(
-        symbols,
-        start=start_date,
-        end=end_date,
-        progress=False,
-        group_by="column",
-        auto_adjust=False,
-        threads=False,
-    )
+    with YFINANCE_DOWNLOAD_LOCK:
+        raw: pd.DataFrame | None = yf.download(
+            symbols,
+            start=start_date,
+            end=end_date,
+            progress=False,
+            group_by="column",
+            auto_adjust=False,
+            threads=False,
+        )
 
     if raw is None or raw.empty:
         return {}

@@ -12,6 +12,7 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
 from core.src.meta_model.model_registry.main import (
     ModelSpec,
     build_default_model_specs,
@@ -52,7 +53,7 @@ def test_fit_model_ridge_learns_simple_linear_signal() -> None:
         "ticker": [f"T{i}" for i in range(8)],
         "feature_a": np.arange(8, dtype=float),
         "feature_b": np.arange(8, dtype=float) * 0.5,
-        "target_intraday_open_to_close_net_cs_zscore": np.arange(8, dtype=float) * 2.0,
+        MODEL_TARGET_COLUMN: np.arange(8, dtype=float) * 2.0,
     })
     test_frame = pd.DataFrame({
         "date": pd.date_range("2022-01-17", periods=2, freq="B"),
@@ -120,7 +121,7 @@ def test_elastic_net_learns_monotonic_signal() -> None:
         "ticker": [f"T{i}" for i in range(10)],
         "feature_a": np.arange(10, dtype=float),
         "feature_b": np.arange(10, dtype=float) * 0.3,
-        "target_intraday_open_to_close_net_cs_zscore": np.arange(10, dtype=float),
+        MODEL_TARGET_COLUMN: np.arange(10, dtype=float),
     })
     test_frame = pd.DataFrame({
         "date": pd.date_range("2022-01-31", periods=2, freq="B"),
@@ -148,7 +149,7 @@ def test_ridge_and_factor_composite_handle_missing_values() -> None:
         "feature_b": [0.5, 1.0, np.nan, 2.0],
         "quant_momentum_21d": [3.0, np.nan, 1.0, 0.0],
         "stock_trading_volume": [30_000.0, 20_000.0, np.nan, 10_000.0],
-        "target_intraday_open_to_close_net_cs_zscore": [1.0, 2.0, 3.0, 4.0],
+        MODEL_TARGET_COLUMN: [1.0, 2.0, 3.0, 4.0],
     })
     test_frame = pd.DataFrame({
         "date": pd.date_range("2022-01-10", periods=2, freq="B"),

@@ -1,3 +1,18 @@
+"""Shared column names and the temporal contract for labels vs features.
+
+One row is (ticker, **signal day J**): the trading session whose close is used to
+compute the signal. With the default ``EXECUTION_LAG_DAYS == 1``, execution happens
+at the next regular open (J+1).
+
+- **Features** on that row must be known by the decision timestamp (after close of J
+    in the default setup). Lagged columns remain valid and same-day features are valid
+    only when they are observable at decision time.
+- **Primary week target** (``WEEK_HOLD_*``): log return from
+    **open(J + EXECUTION_LAG_DAYS)** to **close** five NYSE trading sessions later.
+
+Setting ``EXECUTION_LAG_DAYS == 0`` switches back to same-day open execution.
+"""
+
 from __future__ import annotations
 
 DATE_COLUMN: str = "date"
@@ -24,16 +39,26 @@ SHORT_HOLD_NET_RETURN_COLUMN: str = "target_short_hold_1d_to_2d_net_log_return"
 MEDIUM_HOLD_GROSS_RETURN_COLUMN: str = "target_medium_hold_3d_to_5d_log_return"
 MEDIUM_HOLD_NET_RETURN_COLUMN: str = "target_medium_hold_3d_to_5d_net_log_return"
 
-RAW_FORWARD_RETURN_COLUMN: str = MEDIUM_HOLD_GROSS_RETURN_COLUMN
-BENCHMARK_FORWARD_RETURN_COLUMN: str = INTRADAY_BENCHMARK_RETURN_COLUMN
-EXCESS_FORWARD_RETURN_COLUMN: str = INTRADAY_EXCESS_RETURN_COLUMN
-SECTOR_RESIDUAL_FORWARD_RETURN_COLUMN: str = INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN
-CS_ZSCORE_TARGET_COLUMN: str = INTRADAY_CS_ZSCORE_TARGET_COLUMN
-CS_RANK_TARGET_COLUMN: str = INTRADAY_CS_RANK_TARGET_COLUMN
-MODEL_TARGET_COLUMN: str = INTRADAY_CS_ZSCORE_TARGET_COLUMN
-REALIZED_RETURN_COLUMN: str = INTRADAY_GROSS_RETURN_COLUMN
-PRIMARY_PRODUCTION_LABEL_COLUMN: str = INTRADAY_NET_RETURN_COLUMN
+# Row date J = execution day; entry = open(J); exit = close five sessions later (NYSE week).
+WEEK_HOLD_GROSS_RETURN_COLUMN: str = "target_week_hold_5sessions_close_log_return"
+WEEK_HOLD_NET_RETURN_COLUMN: str = "target_week_hold_5sessions_net_log_return"
+WEEK_HOLD_BENCHMARK_RETURN_COLUMN: str = "benchmark_week_hold_net_log_return"
+WEEK_HOLD_EXCESS_RETURN_COLUMN: str = "target_week_hold_excess_log_return"
+WEEK_HOLD_SECTOR_RESIDUAL_RETURN_COLUMN: str = "target_week_hold_sector_residual_log_return"
+WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN: str = "target_week_hold_net_cs_zscore"
+WEEK_HOLD_CS_RANK_TARGET_COLUMN: str = "target_week_hold_net_cs_rank"
+
+RAW_FORWARD_RETURN_COLUMN: str = WEEK_HOLD_GROSS_RETURN_COLUMN
+BENCHMARK_FORWARD_RETURN_COLUMN: str = WEEK_HOLD_BENCHMARK_RETURN_COLUMN
+EXCESS_FORWARD_RETURN_COLUMN: str = WEEK_HOLD_EXCESS_RETURN_COLUMN
+SECTOR_RESIDUAL_FORWARD_RETURN_COLUMN: str = WEEK_HOLD_SECTOR_RESIDUAL_RETURN_COLUMN
+CS_ZSCORE_TARGET_COLUMN: str = WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN
+CS_RANK_TARGET_COLUMN: str = WEEK_HOLD_CS_RANK_TARGET_COLUMN
+MODEL_TARGET_COLUMN: str = WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN
+REALIZED_RETURN_COLUMN: str = WEEK_HOLD_GROSS_RETURN_COLUMN
+PRIMARY_PRODUCTION_LABEL_COLUMN: str = WEEK_HOLD_NET_RETURN_COLUMN
 SECONDARY_RESEARCH_LABEL_COLUMNS: tuple[str, ...] = (
+    INTRADAY_NET_RETURN_COLUMN,
     OVERNIGHT_NET_RETURN_COLUMN,
     SHORT_HOLD_NET_RETURN_COLUMN,
     MEDIUM_HOLD_NET_RETURN_COLUMN,
@@ -43,7 +68,7 @@ PREDICTION_COLUMN: str = "prediction"
 SIGNAL_DATE_COLUMN: str = "signal_date"
 
 EXECUTION_LAG_DAYS: int = 1
-HOLD_PERIOD_DAYS: int = 0
+HOLD_PERIOD_DAYS: int = 5
 LABEL_EMBARGO_DAYS: int = EXECUTION_LAG_DAYS + HOLD_PERIOD_DAYS
 
 TARGET_PREFIXES: tuple[str, ...] = ("target_",)

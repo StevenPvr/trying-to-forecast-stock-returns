@@ -132,38 +132,6 @@ FEATURE_SELECTION_SUMMARY_JSON: Path = (
     DATA_FEATURE_SELECTION_DIR / "feature_selection_summary.json"
 )
 
-# --- Feature MDA ---
-FEATURE_MDA_GROUP_SCORES_PARQUET: Path = (
-    DATA_FEATURE_SELECTION_DIR / "feature_mda_group_scores.parquet"
-)
-FEATURE_MDA_GROUP_SCORES_CSV: Path = (
-    DATA_FEATURE_SELECTION_DIR / "feature_mda_group_scores.csv"
-)
-FEATURE_MDA_FINAL_SCORES_PARQUET: Path = (
-    DATA_FEATURE_SELECTION_DIR / "feature_mda_final_scores.parquet"
-)
-FEATURE_MDA_FINAL_SCORES_CSV: Path = (
-    DATA_FEATURE_SELECTION_DIR / "feature_mda_final_scores.csv"
-)
-FEATURE_MDA_SELECTED_FEATURES_PARQUET: Path = (
-    DATA_FEATURE_SELECTION_DIR / "feature_mda_selected.parquet"
-)
-FEATURE_MDA_SELECTED_FEATURES_CSV: Path = (
-    DATA_FEATURE_SELECTION_DIR / "feature_mda_selected.csv"
-)
-FEATURE_MDA_FILTERED_FEATURES_PARQUET: Path = (
-    DATA_FEATURE_SELECTION_DIR / "dataset_features_mda_selected.parquet"
-)
-FEATURE_MDA_FILTERED_FEATURES_CSV: Path = (
-    DATA_FEATURE_SELECTION_DIR / "dataset_features_mda_selected_sample_5pct.csv"
-)
-DEEP_FEATURE_MDA_FILTERED_FEATURES_PARQUET: Path = (
-    DATA_FEATURE_SELECTION_DIR / "dataset_deep_features_mda_selected.parquet"
-)
-DEEP_FEATURE_MDA_FILTERED_FEATURES_CSV: Path = (
-    DATA_FEATURE_SELECTION_DIR / "dataset_deep_features_mda_selected_sample_5pct.csv"
-)
-
 # --- Parameter Optimization ---
 DATA_OPTIMIZE_PARAMETERS_DIR: Path = DATA_DIR / "optimize_parameters"
 XGBOOST_OPTUNA_TRIALS_PARQUET: Path = (

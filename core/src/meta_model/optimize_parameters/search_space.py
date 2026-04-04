@@ -46,8 +46,10 @@ def suggest_xgboost_params(
     *,
     threads_per_fold: int,
     random_seed: int,
+    accelerator: str,
+    gpu_device_id: int,
 ) -> dict[str, Any]:
-    return {
+    params: dict[str, Any] = {
         "objective": "reg:squarederror",
         "eval_metric": "rmse",
         "tree_method": "hist",
@@ -64,3 +66,8 @@ def suggest_xgboost_params(
         "alpha": trial.suggest_float("alpha", 1e-3, 25.0, log=True),
         "max_bin": trial.suggest_int("max_bin", 64, 256),
     }
+    if accelerator == "cuda":
+        params["tree_method"] = "hist"
+        params["device"] = "cuda"
+        params["gpu_id"] = gpu_device_id
+    return params

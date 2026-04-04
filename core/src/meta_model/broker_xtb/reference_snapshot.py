@@ -90,15 +90,16 @@ def extract_us_stock_symbols_from_pdf_text(pdf_text: str) -> list[str]:
 
 
 def _build_stock_entry(symbol: str, *, effective_from: str) -> dict[str, object]:
+    # Commission-free cash equity (e.g. XTB tier): no spread/swap/slippage in simulation; full cash margin.
     return {
         "symbol": symbol,
         "instrument_group": "stock_cfd",
         "currency": "USD",
-        "spread_bps": 30.0,
-        "slippage_bps": 5.0,
-        "long_swap_bps_daily": 2.269,
-        "short_swap_bps_daily": 0.231,
-        "margin_requirement": 0.20,
+        "spread_bps": 0.0,
+        "slippage_bps": 0.0,
+        "long_swap_bps_daily": 0.0,
+        "short_swap_bps_daily": 0.0,
+        "margin_requirement": 1.0,
         "max_adv_participation": 0.05,
         "effective_from": effective_from,
         "effective_to": None,

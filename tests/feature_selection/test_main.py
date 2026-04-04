@@ -38,12 +38,12 @@ from core.src.meta_model.optimize_parameters.main import optimize_xgboost_parame
 
 
 def _make_preprocessed_dataset() -> pd.DataFrame:
-    date_index = pd.date_range("2014-01-02", periods=36, freq="B")
+    date_index = pd.date_range("2014-01-02", periods=90, freq="B")
     dates = [cast(pd.Timestamp, date_index[index]) for index in range(len(date_index))]
     tickers = ("AAA", "BBB", "CCC")
     split_by_date: dict[pd.Timestamp, str] = {}
     for index, date in enumerate(dates):
-        split_by_date[date] = "train" if index < 20 else "val" if index < 28 else "test"
+        split_by_date[date] = "train" if index < 60 else "val" if index < 78 else "test"
     target_map = {"AAA": -1.0, "BBB": 0.0, "CCC": 1.0}
     rows: list[dict[str, object]] = []
     for date_position, current_date in enumerate(dates):
@@ -94,7 +94,7 @@ def _make_mock_selection_result() -> RobustFeatureSelectionResult:
             "coverage_fraction": [1.0, 1.0, 1.0],
             "selected": [True, True, False],
             "selection_rank": [1, 2, 0],
-            "drop_reason": ["selected", "selected", "non_positive_mda"],
+            "drop_reason": ["selected", "selected", "rejected_sfi"],
         },
     )
     group_manifest = pd.DataFrame(
@@ -115,8 +115,6 @@ def _make_mock_selection_result() -> RobustFeatureSelectionResult:
         linear_pruning_audit=pd.DataFrame({"feature_name": ["feature_signal"]}),
         distance_correlation_audit=pd.DataFrame({"feature_name": ["feature_signal"]}),
         target_correlation_audit=pd.DataFrame({"feature_name": ["feature_signal"]}),
-        mda_group_scores=pd.DataFrame({"feature_family": ["other"], "feature_stem": ["feature_signal"]}),
-        mda_final_scores=score_frame,
         summary={"selected_feature_count": 2},
     )
 
@@ -162,7 +160,7 @@ class TestFeatureSelection:
         ):
             score_frame, selected_frame, filtered_dataset = run_feature_selection(
                 dataset_path,
-                FeatureSelectionConfig(fold_count=4, emit_input_inventory=False),
+                FeatureSelectionConfig(fold_count=4, emit_input_inventory=False, train_sampling_fraction=1.0),
                 output_bundle=output_bundle,
             )
 
@@ -178,8 +176,6 @@ class TestFeatureSelection:
         assert output_bundle.linear_pruning_audit_parquet.exists()
         assert output_bundle.distance_correlation_audit_parquet.exists()
         assert output_bundle.target_correlation_audit_parquet.exists()
-        assert output_bundle.mda_group_scores_parquet.exists()
-        assert output_bundle.mda_final_scores_parquet.exists()
         assert {"feature_signal", "feature_duplicate"} <= set(filtered_dataset.columns)
         assert "hl_context_company_sector" in filtered_dataset.columns
         assert "hl_context_stock_open_price" in filtered_dataset.columns
@@ -197,6 +193,11 @@ class TestFeatureSelection:
 
     def test_run_feature_selection_raises_when_no_feature_survives(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
+        output_bundle = build_feature_selection_output_bundle(
+            tmp_path,
+            filtered_dataset_parquet_name="filtered_dataset.parquet",
+            filtered_dataset_csv_name="filtered_dataset.csv",
+        )
         _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
         empty_result = RobustFeatureSelectionResult(
             score_frame=pd.DataFrame(
@@ -205,8 +206,7 @@ class TestFeatureSelection:
                     "objective_score": [0.01],
                     "daily_rank_ic_mean": [0.01],
                     "coverage_fraction": [1.0],
-                    "mda_mean_delta_objective": [-0.001],
-                    "drop_reason": ["non_positive_mda"],
+                    "drop_reason": ["rejected_sfi"],
                 },
             ),
             selected_feature_names=[],
@@ -215,8 +215,6 @@ class TestFeatureSelection:
             linear_pruning_audit=pd.DataFrame(),
             distance_correlation_audit=pd.DataFrame(),
             target_correlation_audit=pd.DataFrame(),
-            mda_group_scores=pd.DataFrame(),
-            mda_final_scores=pd.DataFrame(),
             summary={"selected_feature_count": 0},
         )
 
@@ -225,7 +223,11 @@ class TestFeatureSelection:
             return_value=empty_result,
         ):
             with pytest.raises(RuntimeError, match="did not retain any feature"):
-                run_feature_selection(dataset_path, FeatureSelectionConfig(fold_count=4, emit_input_inventory=False))
+                run_feature_selection(
+                    dataset_path,
+                    FeatureSelectionConfig(fold_count=4, emit_input_inventory=False, train_sampling_fraction=1.0),
+                    output_bundle=output_bundle,
+                )
 
     def test_validate_filtered_dataset_matches_selection_detects_schema_drift(self) -> None:
         filtered_dataset = pd.DataFrame(
@@ -261,6 +263,11 @@ class TestFeatureSelection:
 
     def test_run_feature_selection_accepts_selected_context_feature(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
+        output_bundle = build_feature_selection_output_bundle(
+            tmp_path,
+            filtered_dataset_parquet_name="filtered_dataset.parquet",
+            filtered_dataset_csv_name="filtered_dataset.csv",
+        )
         _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
         result = RobustFeatureSelectionResult(
             score_frame=pd.DataFrame(
@@ -280,19 +287,6 @@ class TestFeatureSelection:
             linear_pruning_audit=pd.DataFrame(),
             distance_correlation_audit=pd.DataFrame(),
             target_correlation_audit=pd.DataFrame(),
-            mda_group_scores=pd.DataFrame(),
-            mda_final_scores=pd.DataFrame(
-                {
-                    "feature_name": ["feature_signal", "stock_open_price"],
-                    "mda_mean_delta_objective": [0.01, 0.005],
-                    "mda_std_delta_objective": [0.0, 0.0],
-                    "mda_fold_positive_share": [1.0, 1.0],
-                    "mda_repeat_count": [4, 4],
-                    "selected": [True, True],
-                    "selection_rank": [1, 2],
-                    "drop_reason": ["selected", "selected"],
-                },
-            ),
             summary={"selected_feature_count": 2},
         )
 
@@ -302,7 +296,8 @@ class TestFeatureSelection:
         ):
             score_frame, selected_frame, filtered_dataset = run_feature_selection(
                 dataset_path,
-                FeatureSelectionConfig(fold_count=4, emit_input_inventory=False),
+                FeatureSelectionConfig(fold_count=4, emit_input_inventory=False, train_sampling_fraction=1.0),
+                output_bundle=output_bundle,
             )
 
         assert score_frame is not None
@@ -310,11 +305,16 @@ class TestFeatureSelection:
         assert "stock_open_price" in filtered_dataset.columns
         assert "hl_context_stock_open_price" in filtered_dataset.columns
 
-    def test_run_feature_selection_uses_twenty_percent_of_train_rows_for_selection(
+    def test_run_feature_selection_subsamples_train_dates_before_scoring(
         self,
         tmp_path: Path,
     ) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
+        output_bundle = build_feature_selection_output_bundle(
+            tmp_path,
+            filtered_dataset_parquet_name="filtered_dataset.parquet",
+            filtered_dataset_csv_name="filtered_dataset.csv",
+        )
         _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
         captured: dict[str, int] = {}
 
@@ -331,12 +331,60 @@ class TestFeatureSelection:
                 dataset_path,
                 FeatureSelectionConfig(
                     fold_count=1,
-                    train_sampling_fraction=0.20,
+                    train_sampling_fraction=0.30,
                     emit_input_inventory=False,
                 ),
+                output_bundle=output_bundle,
             )
 
-        assert captured["train_row_count"] == 12
+        assert captured["train_row_count"] == 54
+
+    def test_run_feature_selection_loads_dataset_once_and_uses_in_memory_helpers(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        dataset_path = tmp_path / "preprocessed.parquet"
+        output_bundle = build_feature_selection_output_bundle(
+            tmp_path,
+            filtered_dataset_parquet_name="filtered_dataset.parquet",
+            filtered_dataset_csv_name="filtered_dataset.csv",
+        )
+        _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
+        sampled_selection_dataset = _make_preprocessed_dataset().query("dataset_split == 'train'").copy()
+
+        with (
+            patch(
+                "core.src.meta_model.feature_selection.main.load_sampled_train_feature_selection_dataset",
+                return_value=sampled_selection_dataset,
+            ) as sampled_load_mock,
+            patch(
+                "core.src.meta_model.feature_selection.main.run_robust_feature_selection",
+                return_value=_make_mock_selection_result(),
+            ),
+            patch(
+                "core.src.meta_model.feature_selection.main.load_feature_selection_metadata",
+                wraps=__import__(
+                    "core.src.meta_model.feature_selection.main",
+                    fromlist=["load_feature_selection_metadata"],
+                ).load_feature_selection_metadata,
+            ) as metadata_load_mock,
+            patch(
+                "core.src.meta_model.feature_selection.main.build_selected_feature_dataset",
+                wraps=__import__(
+                    "core.src.meta_model.feature_selection.main",
+                    fromlist=["build_selected_feature_dataset"],
+                ).build_selected_feature_dataset,
+            ) as filtered_mock,
+        ):
+            run_feature_selection(
+                dataset_path,
+                FeatureSelectionConfig(fold_count=4, emit_input_inventory=False, train_sampling_fraction=1.0),
+                output_bundle=output_bundle,
+            )
+
+        sampled_load_mock.assert_called_once()
+        metadata_load_mock.assert_called_once_with(dataset_path)
+        assert filtered_mock.call_count == 1
 
 
 if __name__ == "__main__":

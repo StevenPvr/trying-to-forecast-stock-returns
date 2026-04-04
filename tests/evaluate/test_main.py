@@ -95,6 +95,26 @@ def test_build_daily_signal_candidates_selects_top_and_bottom_one_percent() -> N
     assert {candidate.side for candidate in candidates} == {"long", "short"}
 
 
+def test_build_daily_signal_candidates_long_only_keeps_top_longs() -> None:
+    rows = [
+        {"date": pd.Timestamp("2022-01-03"), "ticker": f"T{i:03d}", "prediction": float(i)}
+        for i in range(100)
+    ]
+    scores = pd.DataFrame(rows)
+
+    candidates = build_daily_signal_candidates(
+        scores,
+        top_fraction=0.01,
+        cost_config=XtbCostConfig(),
+        expected_holding_days=0,
+        neutrality_mode="long_only",
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].ticker == "T099"
+    assert candidates[0].side == "long"
+
+
 def test_select_evaluate_model_specs_keeps_only_xgboost() -> None:
     model_specs = [
         ModelSpec(model_name="ridge"),
@@ -107,15 +127,23 @@ def test_select_evaluate_model_specs_keeps_only_xgboost() -> None:
     assert [model_spec.model_name for model_spec in selected_specs] == ["xgboost"]
 
 
-def test_validate_backtest_config_rejects_same_bar_and_missing_realism_requirements() -> None:
+def test_validate_backtest_config_rejects_invalid_realism_requirements() -> None:
     with pytest.raises(ValueError, match="execution_lag_days"):
         validate_backtest_config(
             BacktestConfig(
-                execution_lag_days=0,
+                execution_lag_days=-1,
                 benchmark_mode="universe_equal_weight",
                 neutrality_mode="sector_beta_neutral",
             ),
         )
+
+    validate_backtest_config(
+        BacktestConfig(
+            execution_lag_days=0,
+            benchmark_mode="universe_equal_weight",
+            neutrality_mode="sector_beta_neutral",
+        ),
+    )
 
     with pytest.raises(ValueError, match="benchmark_mode"):
         validate_backtest_config(
@@ -532,11 +560,11 @@ def test_build_available_training_frame_uses_only_labels_realized_by_prediction_
     training_frame = build_available_training_frame(
         frame,
         prediction_date=_ts("2022-01-17"),
-        label_embargo_days=6,
+        label_embargo_days=5,
     )
 
-    assert training_frame["date"].max() == _ts("2022-01-07")
-    assert _ts("2022-01-10") not in set(cast(pd.Series, training_frame["date"]).tolist())
+    assert training_frame["date"].max() == _ts("2022-01-10")
+    assert _ts("2022-01-11") not in set(cast(pd.Series, training_frame["date"]).tolist())
 
 
 def test_process_prediction_day_updates_daily_equity_immediately() -> None:

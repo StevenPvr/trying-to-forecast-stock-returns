@@ -282,11 +282,13 @@ class TestSaveFeatureDataset:
 
         saved = pd.read_parquet(parquet_path)
         assert "macro_us_treasury_10y_yield_pct_lag_21d" in saved.columns
-        assert "sentiment_aaii_bullish_share_lag_10d" in saved.columns
-        assert "cross_asset_dax_log_return_lag_63d" in saved.columns
+        assert "sentiment_aaii_bullish_share_lag_21d" in saved.columns
+        assert "cross_asset_dax_log_return_lag_21d" in saved.columns
         assert "company_market_cap_usd_lag_21d" in saved.columns
-        assert "calendar_days_since_previous_fomc_lag_21d" in saved.columns
+        assert "calendar_days_since_previous_fomc_lag_5d" in saved.columns
         assert "calendar_is_fomc_announcement_day_lag_1d" not in saved.columns
+        assert "cross_asset_dax_log_return_lag_63d" not in saved.columns
+        assert "sentiment_aaii_bullish_share_lag_10d" not in saved.columns
 
     def test_saves_lagged_dataset_without_pandas_schema_metadata(self, tmp_path: Path) -> None:
         featured: pd.DataFrame = build_feature_dataset(_make_cleaned_price_df(("AAPL", "MSFT")))
@@ -363,7 +365,7 @@ class TestFeatureLags:
         for column in (
             "ta_trend_macd_lag_1d",
             "quant_momentum_21d_lag_5d",
-            "quant_universe_return_1d_ex_self_lag_10d",
+            "quant_universe_return_1d_ex_self_lag_21d",
             "stock_open_log_return_lag_1d",
             "xtb_spread_to_realized_vol_21d_lag_1d",
             "sector_relative_gap_return_lag_5d",
@@ -396,7 +398,7 @@ class TestFeatureLags:
         for column in (
             "ta_trend_macd_lag_1d",
             "quant_momentum_21d_lag_5d",
-            "quant_universe_return_1d_ex_self_lag_10d",
+            "quant_universe_return_1d_ex_self_lag_21d",
             "stock_open_log_return_lag_1d",
         ):
             assert str(lagged[column].dtype) == "float32"

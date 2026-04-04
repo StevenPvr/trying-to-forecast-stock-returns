@@ -16,7 +16,6 @@ from core.src.meta_model.feature_selection.correlation import (
 )
 from core.src.meta_model.feature_selection.cv import SelectionFold
 from core.src.meta_model.feature_selection.grouping import build_feature_buckets
-from core.src.meta_model.feature_selection.mda import MdaSelectionResult, run_mda_selection
 from core.src.meta_model.feature_selection.scoring import BacktestFeatureSubsetScorer
 from core.src.meta_model.feature_selection.sfi import build_sfi_score_frame
 
@@ -32,8 +31,6 @@ class RobustFeatureSelectionResult:
     linear_pruning_audit: pd.DataFrame
     distance_correlation_audit: pd.DataFrame
     target_correlation_audit: pd.DataFrame
-    mda_group_scores: pd.DataFrame
-    mda_final_scores: pd.DataFrame
     summary: dict[str, object]
 
 
@@ -76,17 +73,23 @@ def run_robust_feature_selection(
     )
     _log_survivor_preview("target correlation filter", target_survivors)
     LOGGER.info("Feature selection stage timing | stage=target_correlation_filter | elapsed=%.2fs", time.perf_counter() - stage_start)
-    stage_start = time.perf_counter()
-    mda_result = run_mda_selection(cache, folds, sfi_scores, target_survivors, config)
-    _log_mda_stage_summary(mda_result.final_scores, mda_result.selected_feature_names)
-    LOGGER.info("Feature selection stage timing | stage=mda | elapsed=%.2fs", time.perf_counter() - stage_start)
+    final_selected_names = build_final_candidate_feature_names(sfi_scores, target_survivors)
+    if len(final_selected_names) != len(target_survivors):
+        LOGGER.info(
+            "Feature selection broker feature rescue: target_survivors=%d | final_candidates=%d | rescued=%d | preview=%s",
+            len(target_survivors),
+            len(final_selected_names),
+            len(final_selected_names) - len(target_survivors),
+            ", ".join([n for n in final_selected_names if n not in set(target_survivors)][:5]) or "none",
+        )
+    _log_final_selection_summary(sfi_scores, final_selected_names)
     score_frame = build_feature_score_report(
-        feature_names,
         sfi_scores,
         linear_survivors,
         distance_survivors,
         target_survivors,
-        mda_result,
+        target_audit,
+        final_selected_names,
     )
     summary = build_selection_summary(
         feature_names,
@@ -94,7 +97,7 @@ def run_robust_feature_selection(
         linear_survivors,
         distance_survivors,
         target_survivors,
-        mda_result.selected_feature_names,
+        final_selected_names,
         config,
     )
     LOGGER.info(
@@ -102,18 +105,16 @@ def run_robust_feature_selection(
         int(cast(pd.Series, sfi_scores["passes_sfi"]).sum()),
         len(linear_survivors),
         len(distance_survivors),
-        len(mda_result.selected_feature_names),
+        len(final_selected_names),
     )
     return RobustFeatureSelectionResult(
         score_frame=score_frame,
-        selected_feature_names=mda_result.selected_feature_names,
+        selected_feature_names=final_selected_names,
         group_manifest=group_manifest,
         sfi_scores=sfi_scores,
         linear_pruning_audit=linear_audit,
         distance_correlation_audit=distance_audit,
         target_correlation_audit=target_audit,
-        mda_group_scores=mda_result.group_scores,
-        mda_final_scores=mda_result.final_scores,
         summary=summary,
     )
 
@@ -137,48 +138,94 @@ def build_group_manifest(feature_names: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["group_id", "feature_name"]).reset_index(drop=True)
 
 
+def build_final_candidate_feature_names(
+    sfi_scores: pd.DataFrame,
+    target_survivors: list[str],
+) -> list[str]:
+    """Ordered unique names: target-filter survivors plus rescued broker features."""
+    target_survivor_set = set(target_survivors)
+    broker_bypass_frame = cast(
+        pd.DataFrame,
+        sfi_scores.loc[
+            (cast(pd.Series, sfi_scores["feature_family"]).astype(str) == "broker")
+            & cast(pd.Series, sfi_scores["passes_coverage"]).astype(bool)
+            & ~cast(pd.Series, sfi_scores["feature_name"]).isin(target_survivor_set),
+        ].copy(),
+    )
+    broker_bypass_names = [
+        str(feature_name)
+        for feature_name in cast(pd.Series, broker_bypass_frame.sort_values(
+            ["objective_score", "daily_rank_ic_mean", "coverage_fraction", "feature_name"],
+            ascending=[False, False, False, True],
+        )["feature_name"]).tolist()
+    ]
+    ordered_names = [*target_survivors, *broker_bypass_names]
+    return list(dict.fromkeys(ordered_names))
+
+
 def build_feature_score_report(
-    feature_names: list[str],
     sfi_scores: pd.DataFrame,
     linear_survivors: list[str],
     distance_survivors: list[str],
     target_survivors: list[str],
-    mda_result: MdaSelectionResult,
+    target_correlation_audit: pd.DataFrame,
+    final_selected_names: list[str],
 ) -> pd.DataFrame:
     score_frame = cast(pd.DataFrame, sfi_scores.copy())
     score_frame["selected_linear"] = cast(pd.Series, score_frame["feature_name"]).isin(linear_survivors)
     score_frame["selected_distance"] = cast(pd.Series, score_frame["feature_name"]).isin(distance_survivors)
     score_frame["selected_target_correlation"] = cast(pd.Series, score_frame["feature_name"]).isin(target_survivors)
-    mda_columns = [
+    target_columns = [
         "feature_name",
         "target_distance_correlation",
-        "mda_mean_delta_objective",
-        "mda_std_delta_objective",
-        "mda_fold_positive_share",
-        "mda_repeat_count",
-        "selected",
-        "selection_rank",
-        "drop_reason",
     ]
-    score_frame = cast(
-        pd.DataFrame,
-        score_frame.merge(mda_result.final_scores.loc[:, mda_columns], on="feature_name", how="left"),
-    )
-    score_frame["selected"] = cast(pd.Series, score_frame["selected"]).fillna(False).astype(bool)
-    score_frame["selection_rank"] = cast(pd.Series, score_frame["selection_rank"]).fillna(0).astype(int)
-    score_frame["drop_reason"] = cast(pd.Series, score_frame["drop_reason"]).fillna("rejected_before_mda").astype(str)
-    low_target_corr_mask = cast(pd.Series, score_frame["selected_distance"]).astype(bool) & ~cast(
-        pd.Series,
-        score_frame["selected_target_correlation"],
-    ).astype(bool)
-    score_frame.loc[low_target_corr_mask, "drop_reason"] = "low_target_distance_correlation"
-    missing_mda_mask = ~cast(pd.Series, score_frame["feature_name"]).isin(list(cast(pd.Series, mda_result.final_scores["feature_name"]).astype(str)))
-    score_frame.loc[missing_mda_mask, "drop_reason"] = "rejected_before_mda"
-    score_frame.loc[low_target_corr_mask, "drop_reason"] = "low_target_distance_correlation"
+    available_target_columns = [
+        column_name
+        for column_name in target_columns
+        if column_name in target_correlation_audit.columns
+    ]
+    if len(available_target_columns) > 1:
+        score_frame = cast(
+            pd.DataFrame,
+            score_frame.merge(
+                target_correlation_audit.loc[:, available_target_columns],
+                on="feature_name",
+                how="left",
+            ),
+        )
+    else:
+        score_frame["target_distance_correlation"] = pd.NA
+
+    final_set = set(final_selected_names)
+    rank_map = {name: rank for rank, name in enumerate(final_selected_names, start=1)}
+    name_series = cast(pd.Series, score_frame["feature_name"]).astype(str)
+    score_frame["selected"] = name_series.isin(final_set)
+    score_frame["selection_rank"] = name_series.map(lambda n: rank_map.get(str(n), 0)).astype(int)
+    score_frame["drop_reason"] = _resolve_feature_drop_reasons(score_frame, final_set)
     return score_frame.sort_values(
         ["selected", "selection_rank", "objective_score", "feature_name"],
         ascending=[False, True, False, True],
     ).reset_index(drop=True)
+
+
+def _resolve_feature_drop_reasons(score_frame: pd.DataFrame, final_set: set[str]) -> pd.Series:
+    feature_series = cast(pd.Series, score_frame["feature_name"]).astype(str)
+    in_final = feature_series.isin(final_set)
+    passes_sfi = cast(pd.Series, score_frame["passes_sfi"]).astype(bool)
+    sel_lin = cast(pd.Series, score_frame["selected_linear"]).astype(bool)
+    sel_dist = cast(pd.Series, score_frame["selected_distance"]).astype(bool)
+    sel_tgt = cast(pd.Series, score_frame["selected_target_correlation"]).astype(bool)
+    reasons = pd.Series("not_selected", index=score_frame.index, dtype=object)
+    reasons.loc[in_final] = "selected"
+    pending = ~in_final
+    reasons.loc[pending & ~passes_sfi] = "rejected_sfi"
+    pending = pending & passes_sfi
+    reasons.loc[pending & ~sel_lin] = "rejected_linear_pruning"
+    pending = pending & sel_lin
+    reasons.loc[pending & ~sel_dist] = "rejected_distance_pruning"
+    pending = pending & sel_dist
+    reasons.loc[pending & ~sel_tgt] = "low_target_distance_correlation"
+    return reasons
 
 
 def build_selection_summary(
@@ -205,7 +252,6 @@ def build_selection_summary(
         "linear_correlation_threshold": config.linear_correlation_threshold,
         "distance_correlation_threshold": config.distance_correlation_threshold,
         "target_distance_correlation_threshold": config.target_distance_correlation_threshold,
-        "mda_permutation_repeats": config.mda_permutation_repeats,
     }
 
 
@@ -228,15 +274,16 @@ def _log_survivor_preview(stage_name: str, survivor_names: list[str]) -> None:
     )
 
 
-def _log_mda_stage_summary(final_scores: pd.DataFrame, selected_feature_names: list[str]) -> None:
+def _log_final_selection_summary(sfi_scores: pd.DataFrame, selected_feature_names: list[str]) -> None:
+    selected_set = set(selected_feature_names)
+    picked = cast(
+        pd.DataFrame,
+        sfi_scores.loc[cast(pd.Series, sfi_scores["feature_name"]).astype(str).isin(selected_set)].copy(),
+    )
     LOGGER.info(
-        "Feature selection MDA summary: selected=%d | rejected=%d | top_selected=%s",
+        "Feature selection final summary: selected=%d | top_by_sfi_objective=%s",
         len(selected_feature_names),
-        len(final_scores) - len(selected_feature_names),
-        _build_score_preview(
-            cast(pd.DataFrame, final_scores.loc[cast(pd.Series, final_scores["selected"]).astype(bool)].copy()),
-            score_column="mda_mean_delta_objective",
-        ),
+        _build_score_preview(picked, score_column="objective_score"),
     )
 
 
@@ -253,6 +300,7 @@ def _build_score_preview(score_frame: pd.DataFrame, *, score_column: str) -> str
 __all__ = [
     "RobustFeatureSelectionResult",
     "build_feature_score_report",
+    "build_final_candidate_feature_names",
     "build_group_manifest",
     "build_selection_summary",
     "run_robust_feature_selection",

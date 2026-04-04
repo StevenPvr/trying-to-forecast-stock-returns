@@ -24,10 +24,21 @@ class _DummyCache:
     def __init__(self, frame: pd.DataFrame) -> None:
         self._frame = frame
 
-    def build_feature_frame(self, feature_names: list[str]) -> pd.DataFrame:
+    def build_feature_frame(
+        self,
+        feature_names: list[str],
+        *,
+        row_indices: np.ndarray | None = None,
+    ) -> pd.DataFrame:
         selected_columns = [DATE_COLUMN, TICKER_COLUMN, SPLIT_COLUMN, MODEL_TARGET_COLUMN, *feature_names]
         feature_frame = cast(pd.DataFrame, self._frame.loc[:, selected_columns].copy())
-        return pd.DataFrame(feature_frame)
+        if row_indices is None:
+            return pd.DataFrame(feature_frame)
+        return pd.DataFrame(feature_frame.take(np.asarray(row_indices, dtype=np.int64)).reset_index(drop=True))
+
+    def get_feature_array(self, feature_name: str) -> np.ndarray:
+        feature_series = cast(pd.Series, self._frame[feature_name])
+        return feature_series.to_numpy(dtype=np.float32, copy=True)
 
 
 def _make_fold(index: int, train_indices: list[int], validation_indices: list[int]) -> SelectionFold:
@@ -58,14 +69,15 @@ def test_backtest_feature_subset_scorer_parallelizes_fold_scoring(monkeypatch: p
     ]
 
     def slow_fold_score(
-        train_frame: pd.DataFrame,
+        fold_train: pd.DataFrame,
+        fold_validation: pd.DataFrame,
         feature_names: list[str],
         fold: SelectionFold,
         model_spec: object,
         backtest_config: object,
         cost_config: object,
     ) -> FoldEconomicScore:
-        del train_frame, feature_names, model_spec, backtest_config, cost_config
+        del fold_train, fold_validation, feature_names, model_spec, backtest_config, cost_config
         time.sleep(0.2)
         return FoldEconomicScore(
             index=fold.index,
@@ -87,7 +99,7 @@ def test_backtest_feature_subset_scorer_parallelizes_fold_scoring(monkeypatch: p
     scorer = BacktestFeatureSubsetScorer(
         cast(Any, _DummyCache(frame)),
         folds,
-        FeatureSelectionConfig(parallel_workers=4, state_evaluation_workers=1, null_bootstrap_count=0),
+        FeatureSelectionConfig(parallel_workers=4, null_bootstrap_count=0),
     )
 
     start_time = time.perf_counter()
@@ -96,6 +108,14 @@ def test_backtest_feature_subset_scorer_parallelizes_fold_scoring(monkeypatch: p
 
     assert elapsed < 0.55
     assert score.objective_score > 0.0
+
+
+def test_feature_selection_config_default_parallel_budget_uses_all_cores() -> None:
+    config = FeatureSelectionConfig(parallel_workers=12, null_bootstrap_count=0)
+
+    assert config.resolved_state_evaluation_workers(fold_count=4) == 1
+    assert config.resolved_fold_parallel_workers(fold_count=4) == 4
+    assert config.resolved_model_threads_per_worker(fold_count=4) == 3
 
 
 def test_backtest_feature_subset_scorer_reuses_same_cost_config_across_folds(
@@ -115,14 +135,15 @@ def test_backtest_feature_subset_scorer_reuses_same_cost_config_across_folds(
     observed_cost_config_ids: list[int] = []
 
     def score_with_cost_config_capture(
-        train_frame: pd.DataFrame,
+        fold_train: pd.DataFrame,
+        fold_validation: pd.DataFrame,
         feature_names: list[str],
         fold: SelectionFold,
         model_spec: object,
         backtest_config: object,
         cost_config: object,
     ) -> FoldEconomicScore:
-        del train_frame, feature_names, model_spec, backtest_config
+        del fold_train, fold_validation, feature_names, model_spec, backtest_config
         observed_cost_config_ids.append(id(cost_config))
         return FoldEconomicScore(
             index=fold.index,

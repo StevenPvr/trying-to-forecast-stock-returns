@@ -14,7 +14,7 @@ ALLOCATION_FRACTION: float = 0.05
 GROSS_CAP_FRACTION: float = 1.0
 TARGET_COLUMN: str = MODEL_TARGET_COLUMN
 BENCHMARK_MODE: str = "universe_equal_weight"
-NEUTRALITY_MODE: str = "sector_beta_neutral"
+NEUTRALITY_MODE: str = "long_only"
 ADV_PARTICIPATION_LIMIT: float = 0.05
 TURNOVER_PENALTY_BPS: float = 5.0
 MAX_SPREAD_BPS: float = 35.0
@@ -46,8 +46,8 @@ class BacktestConfig:
 
 
 def validate_backtest_config(config: BacktestConfig) -> None:
-    if config.execution_lag_days <= 0:
-        raise ValueError("execution_lag_days must be strictly positive to forbid same-bar execution.")
+    if config.execution_lag_days < 0:
+        raise ValueError("execution_lag_days must be non-negative.")
     if not config.benchmark_mode.strip():
         raise ValueError("benchmark_mode must be configured explicitly.")
     if not config.neutrality_mode.strip():

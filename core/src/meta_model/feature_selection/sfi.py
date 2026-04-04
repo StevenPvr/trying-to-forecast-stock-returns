@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import replace
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 import logging
 import multiprocessing as mp
 from collections.abc import Callable
@@ -17,7 +19,7 @@ from core.src.meta_model.feature_selection.objective import SubsetEconomicScore
 from core.src.meta_model.feature_selection.scoring import BacktestFeatureSubsetScorer
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
-SFI_WORKER_COUNT: int = 11
+SFI_PROGRESS_HEARTBEAT_SECONDS: float = 10.0
 _PROCESS_CACHE: FeatureSelectionRuntimeCache | None = None
 _PROCESS_SCORER: BacktestFeatureSubsetScorer | None = None
 _PROCESS_CONFIG: FeatureSelectionConfig | None = None
@@ -29,7 +31,7 @@ def build_sfi_score_frame(
     scorer: Callable[[list[str]], SubsetEconomicScore],
     config: FeatureSelectionConfig,
 ) -> pd.DataFrame:
-    worker_count = min(SFI_WORKER_COUNT, max(1, len(feature_names)))
+    worker_count = _resolve_sfi_worker_count(config, len(feature_names))
     LOGGER.info(
         "Feature selection SFI started: features=%d | workers=%d | coverage_threshold=%.2f",
         len(feature_names),
@@ -47,7 +49,7 @@ def build_sfi_score_frame(
                 config,
                 worker_count,
             )
-        except (PermissionError, OSError) as exc:
+        except (PermissionError, OSError, ValueError, BrokenProcessPool) as exc:
             LOGGER.warning(
                 "Feature selection SFI multiprocessing unavailable; falling back to threaded scoring: %s",
                 exc,
@@ -74,26 +76,21 @@ def _score_features_parallel(
     config: FeatureSelectionConfig,
     worker_count: int,
 ) -> list[dict[str, object]]:
-    rows_by_name: dict[str, dict[str, object]] = {}
-    completed_count = 0
+    thread_scorer = _resolve_thread_sfi_scorer(scorer, config, worker_count)
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="feature-sfi") as executor:
         future_map = {
-            executor.submit(_score_single_feature, cache, scorer, feature_name, config): feature_name
+            executor.submit(_score_single_feature, cache, thread_scorer, feature_name, config): feature_name
             for feature_name in feature_names
         }
-        for future in as_completed(future_map):
-            row = future.result()
-            rows_by_name[str(row["feature_name"])] = row
-            completed_count += 1
-            LOGGER.info(
-                "Feature selection SFI progress %d/%d | latest_feature=%s | latest_objective=%.6f | latest_coverage=%.4f | passes_sfi=%s",
-                completed_count,
-                len(feature_names),
-                str(row["feature_name"]),
-                float(cast(float, row["objective_score"])),
-                float(cast(float, row["coverage_fraction"])),
-                bool(cast(bool, row["passes_sfi"])),
-            )
+        LOGGER.info(
+            "Feature selection SFI tasks submitted: features=%d | workers=%d | backend=thread",
+            len(feature_names),
+            worker_count,
+        )
+        rows_by_name = _collect_feature_rows_from_futures(
+            future_map,
+            total_count=len(feature_names),
+        )
     return [rows_by_name[feature_name] for feature_name in sorted(rows_by_name)]
 
 
@@ -104,38 +101,34 @@ def _score_features_parallel_process(
     config: FeatureSelectionConfig,
     worker_count: int,
 ) -> list[dict[str, object]]:
-    rows_by_name: dict[str, dict[str, object]] = {}
-    completed_count = 0
     max_cache_gib = min(0.5, max(0.25, float(cache._max_cache_bytes) / float(1024.0 ** 3 * max(1, worker_count))))
+    worker_config = _build_sfi_worker_config(config, worker_count)
     process_context = mp.get_context("spawn")
     LOGGER.info(
-        "Feature selection SFI multiprocessing enabled: workers=%d | worker_cache_gib=%.2f",
+        "Feature selection SFI multiprocessing enabled: workers=%d | worker_parallel_workers=%d | worker_cache_gib=%.2f",
         worker_count,
+        worker_config.parallel_workers,
         max_cache_gib,
     )
     with ProcessPoolExecutor(
         max_workers=worker_count,
         mp_context=process_context,
         initializer=_initialize_sfi_process_worker,
-        initargs=(cache._dataset_path, cache._metadata, scorer._folds, config, max_cache_gib),
+        initargs=(cache._dataset_path, cache._metadata, scorer._folds, worker_config, max_cache_gib),
     ) as executor:
         future_map = {
             executor.submit(_score_single_feature_process, feature_name): feature_name
             for feature_name in feature_names
         }
-        for future in as_completed(future_map):
-            row = future.result()
-            rows_by_name[str(row["feature_name"])] = row
-            completed_count += 1
-            LOGGER.info(
-                "Feature selection SFI progress %d/%d | latest_feature=%s | latest_objective=%.6f | latest_coverage=%.4f | passes_sfi=%s",
-                completed_count,
-                len(feature_names),
-                str(row["feature_name"]),
-                float(cast(float, row["objective_score"])),
-                float(cast(float, row["coverage_fraction"])),
-                bool(cast(bool, row["passes_sfi"])),
-            )
+        LOGGER.info(
+            "Feature selection SFI tasks submitted: features=%d | workers=%d | backend=process",
+            len(feature_names),
+            worker_count,
+        )
+        rows_by_name = _collect_feature_rows_from_futures(
+            future_map,
+            total_count=len(feature_names),
+        )
     return [rows_by_name[feature_name] for feature_name in sorted(rows_by_name)]
 
 
@@ -143,7 +136,89 @@ def _can_use_process_pool(
     cache: FeatureSelectionRuntimeCache,
     scorer: Callable[[list[str]], SubsetEconomicScore],
 ) -> bool:
-    return isinstance(cache, FeatureSelectionRuntimeCache) and isinstance(scorer, BacktestFeatureSubsetScorer)
+    return (
+        isinstance(cache, FeatureSelectionRuntimeCache)
+        and isinstance(scorer, BacktestFeatureSubsetScorer)
+        and cache._dataset_path is not None
+    )
+
+
+def _resolve_sfi_worker_count(
+    config: FeatureSelectionConfig,
+    feature_count: int,
+) -> int:
+    return min(max(1, config.parallel_workers), max(1, feature_count))
+
+
+def _build_sfi_worker_config(
+    config: FeatureSelectionConfig,
+    worker_count: int,
+) -> FeatureSelectionConfig:
+    per_worker_parallel_workers = max(1, config.parallel_workers // max(1, worker_count))
+    return replace(
+        config,
+        parallel_workers=per_worker_parallel_workers,
+        state_evaluation_workers=1,
+    )
+
+
+def _resolve_thread_sfi_scorer(
+    scorer: Callable[[list[str]], SubsetEconomicScore],
+    config: FeatureSelectionConfig,
+    worker_count: int,
+) -> Callable[[list[str]], SubsetEconomicScore]:
+    if not isinstance(scorer, BacktestFeatureSubsetScorer):
+        return scorer
+    worker_config = _build_sfi_worker_config(config, worker_count)
+    LOGGER.info(
+        "Feature selection SFI thread worker scorer configured: outer_workers=%d | inner_parallel_workers=%d",
+        worker_count,
+        worker_config.parallel_workers,
+    )
+    return BacktestFeatureSubsetScorer(
+        scorer._cache,
+        scorer._folds,
+        worker_config,
+        backtest_config=scorer._backtest_config,
+    )
+
+
+def _collect_feature_rows_from_futures(
+    future_map: dict[Future[dict[str, object]], str],
+    *,
+    total_count: int,
+) -> dict[str, dict[str, object]]:
+    rows_by_name: dict[str, dict[str, object]] = {}
+    completed_count = 0
+    pending_futures: set[Future[dict[str, object]]] = set(future_map)
+    while pending_futures:
+        done_futures, pending_futures = wait(
+            pending_futures,
+            timeout=SFI_PROGRESS_HEARTBEAT_SECONDS,
+            return_when=FIRST_COMPLETED,
+        )
+        if not done_futures:
+            LOGGER.info(
+                "Feature selection SFI heartbeat | completed=%d/%d | remaining=%d",
+                completed_count,
+                total_count,
+                len(pending_futures),
+            )
+            continue
+        for future in done_futures:
+            row = future.result()
+            rows_by_name[str(row["feature_name"])] = row
+            completed_count += 1
+            LOGGER.info(
+                "Feature selection SFI progress %d/%d | latest_feature=%s | latest_objective=%.6f | latest_coverage=%.4f | passes_sfi=%s",
+                completed_count,
+                total_count,
+                str(row["feature_name"]),
+                float(cast(float, row["objective_score"])),
+                float(cast(float, row["coverage_fraction"])),
+                bool(cast(bool, row["passes_sfi"])),
+            )
+    return rows_by_name
 
 
 def _initialize_sfi_process_worker(

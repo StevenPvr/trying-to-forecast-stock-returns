@@ -12,9 +12,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.src.meta_model.feature_selection.io import (
     build_feature_selection_input_inventory,
+    build_feature_selection_input_inventory_from_frame,
+    build_feature_selection_metadata_from_frame,
     build_selected_feature_dataset,
+    build_selected_feature_dataset_from_frame,
     discover_selection_feature_columns,
     load_feature_selection_metadata,
+    load_sampled_train_feature_selection_dataset,
     subsample_train_feature_selection_metadata,
 )
 from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN, is_excluded_feature_column
@@ -74,11 +78,36 @@ class TestFeatureSelectionIo:
         assert inventory.numeric_feature_columns == 2
         assert inventory.non_numeric_non_excluded_columns == 1
 
+    def test_build_feature_selection_input_inventory_from_frame_counts_columns(self) -> None:
+        inventory = build_feature_selection_input_inventory_from_frame(_make_preprocessed_dataset())
+
+        assert inventory.total_columns == 7
+        assert inventory.excluded_columns == 4
+        assert inventory.numeric_feature_columns == 2
+        assert inventory.non_numeric_non_excluded_columns == 1
+
     def test_load_feature_selection_metadata_sorts_canonically(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
         _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
 
         metadata = load_feature_selection_metadata(dataset_path)
+
+        ordered_pairs = list(
+            zip(
+                metadata.frame["date"].dt.strftime("%Y-%m-%d"),
+                metadata.frame["ticker"].astype(str),
+                strict=True,
+            ),
+        )
+        assert ordered_pairs == [
+            ("2024-01-02", "AAA"),
+            ("2024-01-02", "BBB"),
+            ("2024-01-03", "BBB"),
+        ]
+        assert metadata.train_row_indices.tolist() == [0, 2]
+
+    def test_build_feature_selection_metadata_from_frame_sorts_canonically(self) -> None:
+        metadata = build_feature_selection_metadata_from_frame(_make_preprocessed_dataset())
 
         ordered_pairs = list(
             zip(
@@ -142,11 +171,53 @@ class TestFeatureSelectionIo:
         assert len(sampled_dates) == 6
         assert sampled.train_row_indices.size == 12
 
+    def test_load_sampled_train_feature_selection_dataset_reads_only_earliest_sampled_train_dates(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        dataset_path = tmp_path / "preprocessed.parquet"
+        dataset = _make_larger_preprocessed_dataset()
+        dataset["realized_return_1d"] = dataset[MODEL_TARGET_COLUMN]
+        dataset.to_parquet(dataset_path, index=False)
+
+        metadata = load_feature_selection_metadata(dataset_path)
+        sampled_metadata = subsample_train_feature_selection_metadata(
+            metadata,
+            train_sampling_fraction=0.20,
+            minimum_unique_dates=1,
+        )
+        sampled_dataset = load_sampled_train_feature_selection_dataset(
+            dataset_path,
+            sampled_metadata,
+            feature_columns=["feature_float", "feature_int"],
+        )
+
+        sampled_dates = pd.Index(pd.to_datetime(sampled_dataset["date"]).drop_duplicates().sort_values())
+        assert sampled_dates.tolist() == [
+            pd.Timestamp("2024-01-02"),
+            pd.Timestamp("2024-01-03"),
+        ]
+        assert set(sampled_dataset["dataset_split"]) == {"train"}
+
     def test_build_selected_feature_dataset_projects_protected_columns(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
         _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
 
         filtered_dataset = build_selected_feature_dataset(dataset_path, ["feature_float"])
+
+        assert filtered_dataset.columns.tolist() == [
+            "date",
+            "ticker",
+            "dataset_split",
+            MODEL_TARGET_COLUMN,
+            "feature_float",
+        ]
+
+    def test_build_selected_feature_dataset_from_frame_projects_protected_columns(self) -> None:
+        filtered_dataset = build_selected_feature_dataset_from_frame(
+            _make_preprocessed_dataset(),
+            ["feature_float"],
+        )
 
         assert filtered_dataset.columns.tolist() == [
             "date",

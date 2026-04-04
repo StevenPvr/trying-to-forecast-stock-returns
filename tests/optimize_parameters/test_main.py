@@ -228,6 +228,17 @@ class TestResolveParallelism:
         assert plan.fold_workers == 1
         assert plan.threads_per_fold == 11
 
+    def test_forces_single_fold_worker_in_cuda_mode(self) -> None:
+        plan = resolve_parallelism(
+            16,
+            5,
+            accelerator="cuda",
+        )
+
+        assert plan.total_cores == 16
+        assert plan.fold_workers == 1
+        assert plan.threads_per_fold == 16
+
 
 class TestOptimizationDefaults:
     def test_uses_generous_xgboost_early_stopping_defaults(self) -> None:
@@ -236,39 +247,20 @@ class TestOptimizationDefaults:
 
 
 class TestFoldEvaluationBackend:
+    @staticmethod
+    def _thread_backend_should_not_run(*_: Any, **__: Any) -> list[dict[str, int]]:
+        raise AssertionError("thread backend should not be used")
+
     def test_prefers_process_backend_when_available(self, monkeypatch) -> None:
         dataset_bundle: Any = object()
-        folds = [
-            WalkForwardFold(
-                index=1,
-                weight=1.0,
-                train_indices=np.asarray([0, 1], dtype=np.int64),
-                validation_indices=np.asarray([2], dtype=np.int64),
-                train_end_date=pd.Timestamp("2019-01-01"),
-                validation_start_date=pd.Timestamp("2019-01-02"),
-                validation_end_date=pd.Timestamp("2019-01-02"),
-                train_row_count=2,
-                validation_row_count=1,
-            ),
-            WalkForwardFold(
-                index=2,
-                weight=2.0,
-                train_indices=np.asarray([0, 1, 2], dtype=np.int64),
-                validation_indices=np.asarray([3], dtype=np.int64),
-                train_end_date=pd.Timestamp("2019-01-02"),
-                validation_start_date=pd.Timestamp("2019-01-03"),
-                validation_end_date=pd.Timestamp("2019-01-03"),
-                train_row_count=3,
-                validation_row_count=1,
-            ),
-        ]
+        fold_contexts = [object(), object()]
         calls: list[str] = []
 
         monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: True)
         monkeypatch.setattr(
             optimize_main,
             "_install_process_fold_context",
-            lambda dataset_bundle, booster_params, optimization_config: calls.append("install"),
+            lambda dataset_bundle, booster_params, optimization_config, fold_matrix_cache_by_index: calls.append("install"),
         )
         monkeypatch.setattr(
             optimize_main,
@@ -283,12 +275,12 @@ class TestFoldEvaluationBackend:
         monkeypatch.setattr(
             optimize_main,
             "_evaluate_trial_folds_in_thread_pool",
-            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("thread backend should not be used")),
+            self._thread_backend_should_not_run,
         )
 
         results = optimize_main._evaluate_trial_folds(
             dataset_bundle,
-            folds,
+            fold_contexts,
             {"eta": 0.03},
             OptimizationConfig(),
             resolve_parallelism(total_cores=4, fold_count=2),
@@ -299,41 +291,18 @@ class TestFoldEvaluationBackend:
 
     def test_falls_back_to_thread_backend_when_process_backend_is_unavailable(self, monkeypatch) -> None:
         dataset_bundle: Any = object()
-        folds = [
-            WalkForwardFold(
-                index=1,
-                weight=1.0,
-                train_indices=np.asarray([0, 1], dtype=np.int64),
-                validation_indices=np.asarray([2], dtype=np.int64),
-                train_end_date=pd.Timestamp("2019-01-01"),
-                validation_start_date=pd.Timestamp("2019-01-02"),
-                validation_end_date=pd.Timestamp("2019-01-02"),
-                train_row_count=2,
-                validation_row_count=1,
-            ),
-            WalkForwardFold(
-                index=2,
-                weight=2.0,
-                train_indices=np.asarray([0, 1, 2], dtype=np.int64),
-                validation_indices=np.asarray([3], dtype=np.int64),
-                train_end_date=pd.Timestamp("2019-01-02"),
-                validation_start_date=pd.Timestamp("2019-01-03"),
-                validation_end_date=pd.Timestamp("2019-01-03"),
-                train_row_count=3,
-                validation_row_count=1,
-            ),
-        ]
+        fold_contexts = [object(), object()]
 
         monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: False)
         monkeypatch.setattr(
             optimize_main,
             "_evaluate_trial_folds_in_thread_pool",
-            lambda dataset_bundle, folds, booster_params, optimization_config, *, parallelism_plan: [{"fold_index": 1}],
+            lambda dataset_bundle, folds, booster_params, optimization_config, *, parallelism_plan, fold_matrix_cache_by_index: [{"fold_index": 1}],
         )
 
         results = optimize_main._evaluate_trial_folds(
             dataset_bundle,
-            folds,
+            fold_contexts,
             {"eta": 0.03},
             OptimizationConfig(),
             resolve_parallelism(total_cores=4, fold_count=2),
@@ -371,6 +340,8 @@ class TestSearchSpace:
             trial,
             threads_per_fold=4,
             random_seed=7,
+            accelerator="cpu",
+            gpu_device_id=0,
         )
 
         assert params["tree_method"] == "hist"
@@ -384,6 +355,20 @@ class TestSearchSpace:
         assert ("alpha", 1e-3, 25.0, True) in trial.float_calls
         assert ("max_depth", 2, 4) in trial.int_calls
         assert ("max_bin", 64, 256) in trial.int_calls
+
+    def test_injects_cuda_device_parameters_when_accelerator_is_cuda(self) -> None:
+        trial = _RecordingTrial()
+
+        params = suggest_xgboost_params(
+            trial,
+            threads_per_fold=4,
+            random_seed=7,
+            accelerator="cuda",
+            gpu_device_id=2,
+        )
+
+        assert params["device"] == "cuda"
+        assert params["gpu_id"] == 2
 
 
 class TestBuildTrainWindows:
@@ -672,6 +657,7 @@ class TestOptimizeXGBoostParametersIntegration:
         assert best_payload["selected_trial_one_standard_error"]["trial_number"] in {0, 1}
         assert captured["trials_frame"].equals(trials_frame)
         assert captured["best_params"] == best_payload
+        assert best_payload["acceleration"]["accelerator"] == "cpu"
 
     def test_accepts_custom_study_name_and_output_paths(
         self,

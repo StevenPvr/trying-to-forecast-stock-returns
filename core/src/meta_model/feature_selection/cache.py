@@ -29,13 +29,16 @@ SCORING_CONTEXT_COLUMNS: tuple[str, ...] = (
 class FeatureSelectionRuntimeCache:
     def __init__(
         self,
-        dataset_path: Path,
+        dataset_source: Path | pd.DataFrame,
         metadata: FeatureSelectionMetadata,
         *,
         random_seed: int,
         max_cache_gib: float,
     ) -> None:
-        self._dataset_path = dataset_path
+        self._dataset_path = dataset_source if isinstance(dataset_source, Path) else None
+        self._dataset_frame = (
+            pd.DataFrame(dataset_source.copy()) if isinstance(dataset_source, pd.DataFrame) else None
+        )
         self._metadata = metadata
         self._random_seed = random_seed
         self._max_cache_bytes = int(max_cache_gib * (1024.0 ** 3))
@@ -100,9 +103,21 @@ class FeatureSelectionRuntimeCache:
         return pd.DataFrame(sampled_frame)
 
     def get_feature_array(self, feature_name: str) -> np.ndarray:
+        return self.get_feature_array_slice(feature_name)
+
+    def get_feature_array_slice(
+        self,
+        feature_name: str,
+        *,
+        row_indices: np.ndarray | None = None,
+    ) -> np.ndarray:
         self._ensure_feature_arrays([feature_name])
         with self._cache_lock:
-            return np.array(self._feature_cache[feature_name], dtype=np.float32, copy=True)
+            feature_array = self._feature_cache[feature_name]
+        if row_indices is None:
+            return np.asarray(feature_array, dtype=np.float32)
+        target_row_indices = self._resolve_row_indices(row_indices)
+        return np.asarray(feature_array[target_row_indices], dtype=np.float32)
 
     def feature_coverage_fraction(self, feature_name: str) -> float:
         feature_array = self.get_feature_array(feature_name)
@@ -113,7 +128,12 @@ class FeatureSelectionRuntimeCache:
 
     def _load_train_context_frame(self) -> pd.DataFrame:
         available_columns = [column_name for column_name in SCORING_CONTEXT_COLUMNS if column_name in self._metadata.available_columns]
-        loaded = pd.read_parquet(self._dataset_path, columns=available_columns)
+        if self._dataset_frame is not None:
+            loaded = pd.DataFrame(self._dataset_frame.loc[:, available_columns].copy())
+        else:
+            if self._dataset_path is None:
+                raise ValueError("Feature selection cache requires either a dataset path or dataset frame.")
+            loaded = pd.read_parquet(self._dataset_path, columns=available_columns)
         ordered = pd.DataFrame(loaded.take(self._metadata.canonical_order))
         train_frame = pd.DataFrame(ordered.take(self._metadata.train_row_indices).reset_index(drop=True))
         if DATE_COLUMN in train_frame.columns:
@@ -139,7 +159,12 @@ class FeatureSelectionRuntimeCache:
             if not missing_columns:
                 self._touch_feature_arrays(feature_names)
                 return
-        loaded = pd.read_parquet(self._dataset_path, columns=missing_columns)
+        if self._dataset_frame is not None:
+            loaded = pd.DataFrame(self._dataset_frame.loc[:, missing_columns].copy())
+        else:
+            if self._dataset_path is None:
+                raise ValueError("Feature selection cache requires either a dataset path or dataset frame.")
+            loaded = pd.read_parquet(self._dataset_path, columns=missing_columns)
         ordered = pd.DataFrame(loaded.take(self._metadata.canonical_order))
         train_frame = pd.DataFrame(ordered.take(self._metadata.train_row_indices).reset_index(drop=True))
         with self._cache_lock:
@@ -155,7 +180,12 @@ class FeatureSelectionRuntimeCache:
             self._enforce_cache_limit()
 
     def _load_feature_arrays_direct(self, feature_names: list[str]) -> dict[str, np.ndarray]:
-        loaded = pd.read_parquet(self._dataset_path, columns=feature_names)
+        if self._dataset_frame is not None:
+            loaded = pd.DataFrame(self._dataset_frame.loc[:, feature_names].copy())
+        else:
+            if self._dataset_path is None:
+                raise ValueError("Feature selection cache requires either a dataset path or dataset frame.")
+            loaded = pd.read_parquet(self._dataset_path, columns=feature_names)
         ordered = pd.DataFrame(loaded.take(self._metadata.canonical_order))
         train_frame = pd.DataFrame(ordered.take(self._metadata.train_row_indices).reset_index(drop=True))
         feature_arrays: dict[str, np.ndarray] = {}

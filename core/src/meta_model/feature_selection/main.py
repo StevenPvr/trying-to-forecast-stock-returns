@@ -19,11 +19,14 @@ from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
 from core.src.meta_model.feature_selection.cv import build_train_only_selection_folds
 from core.src.meta_model.feature_selection.io import (
     FeatureSelectionOutputBundle,
+    build_feature_selection_metadata_from_frame,
     build_feature_selection_input_inventory,
     build_selected_feature_dataset,
     build_default_feature_selection_output_bundle,
     discover_selection_feature_columns,
+    load_sampled_train_feature_selection_dataset,
     load_feature_selection_metadata,
+    materialize_feature_selection_dataset,
     save_feature_selection_outputs,
     subsample_train_feature_selection_metadata,
 )
@@ -95,7 +98,7 @@ def run_feature_selection(
         input_inventory.non_numeric_non_excluded_columns,
     )
     metadata = load_feature_selection_metadata(dataset_path)
-    metadata = subsample_train_feature_selection_metadata(
+    sampled_metadata = subsample_train_feature_selection_metadata(
         metadata,
         train_sampling_fraction=selection_config.train_sampling_fraction,
         minimum_unique_dates=selection_config.fold_count + LABEL_EMBARGO_DAYS + 1,
@@ -103,30 +106,37 @@ def run_feature_selection(
     feature_columns = discover_selection_feature_columns(dataset_path)
     if not feature_columns:
         raise ValueError("Feature selection found no numeric feature columns to score.")
+    selection_dataset = load_sampled_train_feature_selection_dataset(
+        dataset_path,
+        sampled_metadata,
+        feature_columns,
+    )
+    selection_metadata = build_feature_selection_metadata_from_frame(selection_dataset)
     LOGGER.info(
         "Feature selection candidates discovered: features=%d | train_rows=%d | available_columns=%d",
         len(feature_columns),
-        metadata.train_row_indices.size,
-        len(metadata.available_columns),
+        selection_metadata.train_row_indices.size,
+        len(selection_metadata.available_columns),
     )
-    cache = FeatureSelectionRuntimeCache(
-        dataset_path,
-        metadata,
-        random_seed=selection_config.random_seed,
-        max_cache_gib=max(selection_config.max_active_matrix_gib / 2.0, 0.5),
-    )
-    folds = build_train_only_selection_folds(
-        metadata,
-        selection_config.fold_count,
-        label_embargo_days=LABEL_EMBARGO_DAYS,
-    )
-    LOGGER.info("Feature selection folds built: count=%d", len(folds))
-    selection_result = run_robust_feature_selection(
-        cache,
-        folds,
-        feature_columns,
-        selection_config,
-    )
+    with materialize_feature_selection_dataset(selection_dataset) as selection_dataset_path:
+        cache = FeatureSelectionRuntimeCache(
+            selection_dataset_path,
+            selection_metadata,
+            random_seed=selection_config.random_seed,
+            max_cache_gib=max(selection_config.max_active_matrix_gib / 2.0, 0.5),
+        )
+        folds = build_train_only_selection_folds(
+            selection_metadata,
+            selection_config.fold_count,
+            label_embargo_days=LABEL_EMBARGO_DAYS,
+        )
+        LOGGER.info("Feature selection folds built: count=%d", len(folds))
+        selection_result = run_robust_feature_selection(
+            cache,
+            folds,
+            feature_columns,
+            selection_config,
+        )
     selected_feature_names = selection_result.selected_feature_names
     if not selected_feature_names:
         raise RuntimeError(_build_selection_failure_message(selection_result.score_frame))
@@ -148,8 +158,6 @@ def run_feature_selection(
         linear_pruning_audit=selection_result.linear_pruning_audit,
         distance_correlation_audit=selection_result.distance_correlation_audit,
         target_correlation_audit=selection_result.target_correlation_audit,
-        mda_group_scores=selection_result.mda_group_scores,
-        mda_final_scores=selection_result.mda_final_scores,
         summary=selection_result.summary,
     )
     selected_frame = pd.DataFrame(
@@ -170,7 +178,7 @@ def run_feature_selection(
 
 def _build_selection_failure_message(score_frame: pd.DataFrame) -> str:
     if score_frame.empty:
-        return "Feature selection did not retain any feature after SFI, pruning and MDA."
+        return "Feature selection did not retain any feature after SFI and pruning stages."
     sorted_history = score_frame.sort_values(
         ["objective_score", "daily_rank_ic_mean", "coverage_fraction", "feature_name"],
         ascending=[False, False, False, True],
@@ -178,10 +186,9 @@ def _build_selection_failure_message(score_frame: pd.DataFrame) -> str:
     best_records = cast(list[dict[str, object]], sorted_history.to_dict(orient="records"))
     best_row = best_records[0]
     return (
-        "Feature selection did not retain any feature after SFI, pruning and MDA. "
+        "Feature selection did not retain any feature after SFI and pruning stages. "
         f"Best candidate: feature={str(best_row['feature_name'])}, "
         f"sfi_objective={float(cast(float, best_row.get('objective_score', 0.0))):.6f}, "
-        f"mda_delta={float(cast(float, best_row.get('mda_mean_delta_objective', 0.0))):.6f}, "
         f"drop_reason={str(best_row.get('drop_reason', 'unknown'))}"
     )
 

@@ -289,7 +289,7 @@ def test_build_reference_outputs_prefers_wrds_extracts(tmp_path: Path) -> None:
         wrds_fundq_extract_csv=tmp_path / "fundq.csv",
     )
     config.xtb_instrument_specs_json.write_text(
-        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":30.0,"slippage_bps":5.0,"long_swap_bps_daily":2.269,"short_swap_bps_daily":0.231,"margin_requirement":0.2,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
+        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
         encoding="utf-8",
     )
     config.wrds_fundq_extract_csv.write_text(
@@ -406,7 +406,7 @@ def test_build_reference_outputs_falls_back_when_wrds_direct_fails(tmp_path: Pat
         xtb_instrument_specs_json=tmp_path / "xtb.json",
     )
     config.xtb_instrument_specs_json.write_text(
-        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":30.0,"slippage_bps":5.0,"long_swap_bps_daily":2.269,"short_swap_bps_daily":0.231,"margin_requirement":0.2,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
+        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
         encoding="utf-8",
     )
     historical_components = pd.DataFrame(

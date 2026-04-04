@@ -19,7 +19,7 @@ TICKER_COLUMN: str = CONTRACT_TICKER_COLUMN
 TRAIN_SPLIT_NAME: str = CONTRACT_TRAIN_SPLIT_NAME
 VAL_SPLIT_NAME: str = CONTRACT_VAL_SPLIT_NAME
 TARGET_COLUMN: str = MODEL_TARGET_COLUMN
-DEFAULT_FOLD_COUNT: int = 5
+DEFAULT_FOLD_COUNT: int = 12
 DEFAULT_TRIAL_COUNT: int = 200
 TARGET_HORIZON_DAYS: int = LABEL_EMBARGO_DAYS
 STABILITY_PENALTY_ALPHA: float = 0.10
@@ -32,6 +32,9 @@ DEFAULT_BOOST_ROUNDS: int = 3000
 RECENT_TRAIN_TAIL_FRACTION: float = 0.67
 RANDOM_TRAIN_WINDOW_COUNT: int = 1
 RANDOM_TRAIN_WINDOW_MIN_FRACTION: float = 0.60
+COMPUTE_ACCELERATOR: str = "auto"
+GPU_DEVICE_ID: int = 0
+ENABLE_GPU_MATRIX_CACHE: bool = True
 
 
 @dataclass(frozen=True)
@@ -49,3 +52,6 @@ class OptimizationConfig:
     recent_train_tail_fraction: float = RECENT_TRAIN_TAIL_FRACTION
     random_train_window_count: int = RANDOM_TRAIN_WINDOW_COUNT
     random_train_window_min_fraction: float = RANDOM_TRAIN_WINDOW_MIN_FRACTION
+    compute_accelerator: str = COMPUTE_ACCELERATOR
+    gpu_device_id: int = GPU_DEVICE_ID
+    enable_gpu_matrix_cache: bool = ENABLE_GPU_MATRIX_CACHE

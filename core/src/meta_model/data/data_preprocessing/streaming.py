@@ -41,6 +41,7 @@ from core.src.meta_model.model_contract import (
     INTRADAY_NET_RETURN_COLUMN,
     MODEL_TARGET_COLUMN,
     REALIZED_RETURN_COLUMN,
+    WEEK_HOLD_NET_RETURN_COLUMN,
 )
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -324,7 +325,14 @@ def compute_target_metric_table(
 ) -> pd.DataFrame:
     metric_columns = _available_columns(
         stage1_path,
-        ["date", "ticker", "company_sector", "company_industry", INTRADAY_NET_RETURN_COLUMN],
+        [
+            "date",
+            "ticker",
+            "company_sector",
+            "company_industry",
+            INTRADAY_NET_RETURN_COLUMN,
+            WEEK_HOLD_NET_RETURN_COLUMN,
+        ],
     )
     stage1_metrics = pd.read_parquet(stage1_path, columns=metric_columns)
     stage1_metrics["date"] = pd.to_datetime(stage1_metrics["date"])

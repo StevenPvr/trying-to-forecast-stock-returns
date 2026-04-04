@@ -198,7 +198,7 @@ def _log_cost_profile(spec_provider: BrokerSpecProvider) -> None:
         dtype=np.float64,
     )
     LOGGER.info(
-        "XTB stock CFD cost profile: symbols=%d | spread_bps(avg/min/max)=%.3f/%.3f/%.3f | slippage_bps(avg/min/max)=%.3f/%.3f/%.3f | long_swap_bps_daily(avg)=%.3f | short_swap_bps_daily(avg)=%.3f",
+        "XTB equity cost profile (specs; commission-free cash assumption): symbols=%d | spread_bps(avg/min/max)=%.3f/%.3f/%.3f | slippage_bps(avg/min/max)=%.3f/%.3f/%.3f | long_swap_bps_daily(avg)=%.3f | short_swap_bps_daily(avg)=%.3f",
         len(stock_specs),
         float(spread_bps.mean()),
         float(spread_bps.min()),
@@ -382,6 +382,7 @@ def _build_manual_trades(
         top_fraction=config.top_fraction,
         cost_config=xtb_cost_config,
         expected_holding_days=config.hold_period_days,
+        neutrality_mode=config.neutrality_mode,
     )
     return allocate_signal_candidates(
         trade_date=latest_prediction_date,

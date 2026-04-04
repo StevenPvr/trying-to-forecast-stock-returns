@@ -245,6 +245,7 @@ def build_daily_signal_candidates(
     top_fraction: float,
     cost_config: XtbCostConfig,
     expected_holding_days: int,
+    neutrality_mode: str = "sector_beta_neutral",
 ) -> list[SignalCandidate]:
     if daily_predictions.empty:
         return []
@@ -253,14 +254,17 @@ def build_daily_signal_candidates(
         daily_predictions,
         top_fraction=top_fraction,
     )
+    long_candidates = _build_candidates_from_block(
+        long_block,
+        side="long",
+        trade_date=trade_date,
+        cost_config=cost_config,
+        expected_holding_days=expected_holding_days,
+    )
+    if neutrality_mode == "long_only":
+        return long_candidates
     return [
-        *_build_candidates_from_block(
-            long_block,
-            side="long",
-            trade_date=trade_date,
-            cost_config=cost_config,
-            expected_holding_days=expected_holding_days,
-        ),
+        *long_candidates,
         *_build_candidates_from_block(
             short_block,
             side="short",
@@ -293,6 +297,8 @@ def _prepare_side_candidates(
     ordered_candidates = sorted(candidates, key=lambda candidate: abs(candidate.prediction), reverse=True)
     long_candidates = [candidate for candidate in ordered_candidates if candidate.side == "long"]
     short_candidates = [candidate for candidate in ordered_candidates if candidate.side == "short"]
+    if neutrality_mode == "long_only":
+        return long_candidates, []
     if neutrality_mode not in {"sector_neutral", "sector_beta_neutral"}:
         return long_candidates, short_candidates
     long_sectors = {candidate.sector for candidate in long_candidates}
@@ -313,6 +319,8 @@ def _resolve_side_target_notionals(
     neutrality_mode: str,
 ) -> tuple[float, float]:
     gross_target_notional = gross_cap_fraction * current_equity
+    if neutrality_mode == "long_only":
+        return gross_target_notional, 0.0
     if neutrality_mode != "sector_beta_neutral":
         half_gross = gross_target_notional / 2.0
         return half_gross, half_gross
@@ -551,15 +559,26 @@ def allocate_signal_candidates(
         candidates,
         neutrality_mode=neutrality_mode,
     )
-    if not long_candidates or not short_candidates:
+    if neutrality_mode == "long_only":
+        if not long_candidates:
+            return []
+        long_target_notional, short_target_notional = _resolve_side_target_notionals(
+            long_candidates,
+            short_candidates,
+            current_equity=current_equity,
+            gross_cap_fraction=gross_cap_fraction,
+            neutrality_mode=neutrality_mode,
+        )
+    elif not long_candidates or not short_candidates:
         return []
-    long_target_notional, short_target_notional = _resolve_side_target_notionals(
-        long_candidates,
-        short_candidates,
-        current_equity=current_equity,
-        gross_cap_fraction=gross_cap_fraction,
-        neutrality_mode=neutrality_mode,
-    )
+    else:
+        long_target_notional, short_target_notional = _resolve_side_target_notionals(
+            long_candidates,
+            short_candidates,
+            current_equity=current_equity,
+            gross_cap_fraction=gross_cap_fraction,
+            neutrality_mode=neutrality_mode,
+        )
     context = AllocationContext(
         trade_date=trade_date,
         exit_date=exit_date,
@@ -705,6 +724,7 @@ def process_prediction_day(
         top_fraction=top_fraction,
         cost_config=cost_config,
         expected_holding_days=hold_period_days,
+        neutrality_mode=neutrality_mode,
     )
     new_trades = allocate_signal_candidates(
         trade_date=trade_date,

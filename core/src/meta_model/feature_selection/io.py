@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import logging
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator, cast
@@ -24,6 +26,7 @@ from core.src.meta_model.data.registry import (
 from core.src.meta_model.model_contract import (
     DATE_COLUMN,
     MODEL_TARGET_COLUMN,
+    REALIZED_RETURN_COLUMN,
     SPLIT_COLUMN,
     TICKER_COLUMN,
     TRAIN_SPLIT_NAME,
@@ -86,10 +89,6 @@ class FeatureSelectionOutputBundle:
     distance_correlation_audit_csv: Path
     target_correlation_audit_parquet: Path
     target_correlation_audit_csv: Path
-    mda_group_scores_parquet: Path
-    mda_group_scores_csv: Path
-    mda_final_scores_parquet: Path
-    mda_final_scores_csv: Path
     wrapper_search_parquet: Path
     wrapper_search_csv: Path
     summary_json: Path
@@ -147,6 +146,29 @@ def build_feature_selection_input_inventory(
     )
 
 
+def build_feature_selection_input_inventory_from_frame(
+    data: pd.DataFrame,
+) -> FeatureSelectionInputInventory:
+    excluded_columns = 0
+    numeric_feature_columns = 0
+    non_numeric_non_excluded_columns = 0
+    for column_name in [str(name) for name in cast(list[object], data.columns.tolist())]:
+        if is_excluded_feature_column(column_name):
+            excluded_columns += 1
+            continue
+        if pd.api.types.is_numeric_dtype(data[column_name]):
+            numeric_feature_columns += 1
+            continue
+        non_numeric_non_excluded_columns += 1
+    return FeatureSelectionInputInventory(
+        row_groups=1,
+        total_columns=len(data.columns),
+        excluded_columns=excluded_columns,
+        numeric_feature_columns=numeric_feature_columns,
+        non_numeric_non_excluded_columns=non_numeric_non_excluded_columns,
+    )
+
+
 def save_feature_selection_input_inventory(
     inventory: FeatureSelectionInputInventory,
     path: Path | None = None,
@@ -186,10 +208,6 @@ def build_feature_selection_output_bundle(
         distance_correlation_audit_csv=output_dir / "feature_distance_correlation_audit.csv",
         target_correlation_audit_parquet=output_dir / "feature_target_correlation_audit.parquet",
         target_correlation_audit_csv=output_dir / "feature_target_correlation_audit.csv",
-        mda_group_scores_parquet=output_dir / "feature_mda_group_scores.parquet",
-        mda_group_scores_csv=output_dir / "feature_mda_group_scores.csv",
-        mda_final_scores_parquet=output_dir / "feature_mda_final_scores.parquet",
-        mda_final_scores_csv=output_dir / "feature_mda_final_scores.csv",
         wrapper_search_parquet=output_dir / "feature_wrapper_search.parquet",
         wrapper_search_csv=output_dir / "feature_wrapper_search.csv",
         summary_json=output_dir / "feature_selection_summary.json",
@@ -212,6 +230,21 @@ def load_feature_selection_metadata(
         path,
         columns=[DATE_COLUMN, TICKER_COLUMN, SPLIT_COLUMN, MODEL_TARGET_COLUMN],
     )
+    metadata = build_feature_selection_metadata_from_frame(data)
+    return FeatureSelectionMetadata(
+        frame=metadata.frame,
+        target_values=metadata.target_values,
+        ordered_dates=metadata.ordered_dates,
+        canonical_order=metadata.canonical_order,
+        train_row_indices=metadata.train_row_indices,
+        available_columns=schema_info.field_names,
+    )
+
+
+def build_feature_selection_metadata_from_frame(
+    data: pd.DataFrame,
+) -> FeatureSelectionMetadata:
+    available_columns = tuple(str(name) for name in cast(list[object], data.columns.tolist()))
     prepared = pd.DataFrame(data.copy())
     prepared[DATE_COLUMN] = pd.to_datetime(prepared[DATE_COLUMN])
     prepared[TICKER_COLUMN] = prepared[TICKER_COLUMN].astype("category")
@@ -240,7 +273,7 @@ def load_feature_selection_metadata(
         ordered_dates=ordered_dates,
         canonical_order=canonical_order,
         train_row_indices=train_row_indices,
-        available_columns=schema_info.field_names,
+        available_columns=available_columns,
     )
 
 
@@ -295,6 +328,70 @@ def load_preprocessed_feature_selection_dataset(
     prepared = data.copy()
     prepared[DATE_COLUMN] = pd.to_datetime(prepared[DATE_COLUMN])
     return prepared.sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
+
+
+def load_sampled_train_feature_selection_dataset(
+    path: Path,
+    metadata: FeatureSelectionMetadata,
+    feature_columns: list[str],
+) -> pd.DataFrame:
+    sampled_train_frame = pd.DataFrame(
+        metadata.frame.take(metadata.train_row_indices).reset_index(drop=True),
+    )
+    sampled_dates = pd.Index(
+        pd.to_datetime(cast(pd.Series, sampled_train_frame[DATE_COLUMN])).drop_duplicates().sort_values(),
+    )
+    if sampled_dates.empty:
+        raise ValueError("Feature selection metadata does not contain sampled train dates.")
+    cutoff_date = cast(pd.Timestamp, sampled_dates[-1])
+    required_columns = _deduplicate_preserving_order(
+        [
+            DATE_COLUMN,
+            TICKER_COLUMN,
+            SPLIT_COLUMN,
+            MODEL_TARGET_COLUMN,
+            REALIZED_RETURN_COLUMN,
+            "company_sector",
+            "company_beta",
+            "stock_open_price",
+            "stock_trading_volume",
+            *feature_columns,
+        ],
+    )
+    available_columns = set(metadata.available_columns)
+    selected_columns = [
+        column_name
+        for column_name in required_columns
+        if column_name in available_columns
+    ]
+    data = pd.read_parquet(
+        path,
+        columns=selected_columns,
+        filters=[
+            (SPLIT_COLUMN, "==", TRAIN_SPLIT_NAME),
+            (DATE_COLUMN, "<=", cutoff_date),
+        ],
+    )
+    prepared = pd.DataFrame(data.copy())
+    prepared[DATE_COLUMN] = pd.to_datetime(prepared[DATE_COLUMN])
+    sampled_mask = cast(pd.Series, prepared[DATE_COLUMN]).isin(sampled_dates)
+    return prepared.loc[sampled_mask].sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
+
+
+@contextmanager
+def materialize_feature_selection_dataset(
+    data: pd.DataFrame,
+) -> Iterator[Path]:
+    with tempfile.TemporaryDirectory(prefix="feature-selection-") as temp_dir_name:
+        dataset_path = Path(temp_dir_name) / "sampled_train_selection.parquet"
+        data.to_parquet(dataset_path, index=False)
+        LOGGER.info(
+            "Materialized feature-selection sampled dataset: rows=%d | columns=%d | path=%s",
+            len(data),
+            len(data.columns),
+            dataset_path,
+        )
+        yield dataset_path
 
 
 def discover_selection_feature_columns(
@@ -383,6 +480,52 @@ def build_selected_feature_dataset(
     return prepared.sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
 
 
+def build_selected_feature_dataset_from_frame(
+    dataset: pd.DataFrame,
+    selected_feature_names: list[str],
+    retained_context_columns: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    column_names = [str(name) for name in cast(list[object], dataset.columns.tolist())]
+    protected_columns = [
+        column_name
+        for column_name in column_names
+        if is_excluded_feature_column(column_name)
+    ]
+    available_columns = set(column_names)
+    retained_context_map = {
+        source_column: retained_column
+        for source_column, retained_column in (retained_context_columns or {}).items()
+        if source_column in available_columns
+    }
+    selected_feature_name_set = set(selected_feature_names)
+    non_overlapping_context_columns = [
+        source_column
+        for source_column in retained_context_map.keys()
+        if source_column not in selected_feature_name_set
+    ]
+    ordered_columns = _deduplicate_preserving_order(
+        [*protected_columns, *non_overlapping_context_columns, *selected_feature_names],
+    )
+    prepared = pd.DataFrame(dataset.loc[:, ordered_columns].copy())
+    prepared[DATE_COLUMN] = pd.to_datetime(prepared[DATE_COLUMN])
+    if retained_context_map:
+        overlap_columns = [
+            source_column
+            for source_column in retained_context_map
+            if source_column in selected_feature_name_set
+        ]
+        rename_map = {
+            source_column: retained_column
+            for source_column, retained_column in retained_context_map.items()
+            if source_column not in selected_feature_name_set
+        }
+        if rename_map:
+            prepared = prepared.rename(columns=rename_map)
+        for source_column in overlap_columns:
+            prepared[retained_context_map[source_column]] = prepared[source_column]
+    return prepared.sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
+
+
 def _deduplicate_preserving_order(column_names: list[str]) -> list[str]:
     unique_columns: list[str] = []
     seen: set[str] = set()
@@ -406,8 +549,6 @@ def save_feature_selection_outputs(
     linear_pruning_audit: pd.DataFrame | None = None,
     distance_correlation_audit: pd.DataFrame | None = None,
     target_correlation_audit: pd.DataFrame | None = None,
-    mda_group_scores: pd.DataFrame | None = None,
-    mda_final_scores: pd.DataFrame | None = None,
     wrapper_search_history: pd.DataFrame | None = None,
     summary: dict[str, object] | None = None,
 ) -> None:
@@ -459,12 +600,6 @@ def save_feature_selection_outputs(
             index=False,
         )
         target_correlation_audit.to_csv(bundle.target_correlation_audit_csv, index=False)
-    if mda_group_scores is not None:
-        mda_group_scores.to_parquet(bundle.mda_group_scores_parquet, index=False)
-        mda_group_scores.to_csv(bundle.mda_group_scores_csv, index=False)
-    if mda_final_scores is not None:
-        mda_final_scores.to_parquet(bundle.mda_final_scores_parquet, index=False)
-        mda_final_scores.to_csv(bundle.mda_final_scores_csv, index=False)
     if wrapper_search_history is not None:
         wrapper_search_history.to_parquet(bundle.wrapper_search_parquet, index=False)
         wrapper_search_history.to_csv(bundle.wrapper_search_csv, index=False)
@@ -489,13 +624,17 @@ __all__ = [
     "FeatureSelectionOutputBundle",
     "build_feature_selection_output_bundle",
     "build_feature_selection_input_inventory",
+    "build_feature_selection_input_inventory_from_frame",
+    "build_feature_selection_metadata_from_frame",
     "build_default_feature_selection_output_bundle",
     "build_selected_feature_dataset",
+    "build_selected_feature_dataset_from_frame",
     "discover_protected_columns",
     "discover_selection_feature_columns",
     "iter_feature_batches",
     "load_feature_selection_metadata",
     "load_preprocessed_feature_selection_dataset",
+    "load_sampled_train_feature_selection_dataset",
     "save_feature_selection_input_inventory",
     "save_feature_selection_outputs",
     "subsample_train_feature_selection_metadata",

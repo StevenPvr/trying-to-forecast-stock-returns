@@ -43,7 +43,7 @@ def test_launch_readiness_passes_with_required_files_present(
     membership_path.write_text("ticker,start_date,end_date\nAAPL,2024-01-01,2024-12-31\n")
     fundamentals_path.write_text("date,ticker,company_market_cap_usd\n2024-01-02,AAPL,100\n")
     xtb_snapshot_path.write_text(
-        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":30.0,"slippage_bps":5.0,"long_swap_bps_daily":2.269,"short_swap_bps_daily":0.231,"margin_requirement":0.2,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
+        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
         encoding="utf-8",
     )
 
@@ -79,7 +79,7 @@ def test_launch_readiness_requires_fred_api_key(
     membership_path.write_text("ticker,start_date,end_date\nAAPL,2024-01-01,2024-12-31\n")
     fundamentals_path.write_text("date,ticker,company_market_cap_usd\n2024-01-02,AAPL,100\n")
     xtb_snapshot_path.write_text(
-        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":30.0,"slippage_bps":5.0,"long_swap_bps_daily":2.269,"short_swap_bps_daily":0.231,"margin_requirement":0.2,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
+        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
         encoding="utf-8",
     )
 

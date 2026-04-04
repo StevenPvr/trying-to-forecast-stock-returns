@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
+from core.src.meta_model.model_contract import DATE_COLUMN, MODEL_TARGET_COLUMN
 from core.src.meta_model.optimize_parameters.search_space import load_xgboost_module
 
 

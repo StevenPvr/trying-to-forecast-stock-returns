@@ -65,6 +65,13 @@ class BacktestFeatureSubsetScorer:
             params=model_params,
             training_rounds=config.proxy_training_rounds,
         )
+        self._fold_context_frames = {
+            fold.index: {
+                "train": self._cache.build_feature_frame([], row_indices=fold.train_indices),
+                "validation": self._cache.build_feature_frame([], row_indices=fold.validation_indices),
+            }
+            for fold in folds
+        }
         self._memo: dict[tuple[str, ...], SubsetEconomicScore] = {}
         self._memo_lock = RLock()
         LOGGER.info(
@@ -93,37 +100,42 @@ class BacktestFeatureSubsetScorer:
     def _score_feature_subset(self, feature_names: list[str]) -> SubsetEconomicScore:
         if not feature_names:
             return aggregate_subset_score([], [])
-        train_frame = self._cache.build_feature_frame(feature_names)
+        feature_arrays = {
+            feature_name: self._cache.get_feature_array(feature_name)
+            for feature_name in feature_names
+        }
         if self._fold_worker_count == 1 or len(self._folds) == 1:
-            fold_scores = [self._score_single_fold(train_frame, feature_names, fold) for fold in self._folds]
+            fold_scores = [self._score_single_fold(feature_arrays, feature_names, fold) for fold in self._folds]
         else:
             with ThreadPoolExecutor(max_workers=self._fold_worker_count, thread_name_prefix="feature-selection") as executor:
                 fold_scores = list(
                     executor.map(
-                        self._score_single_fold_from_shared_frame,
-                        repeat(train_frame, len(self._folds)),
+                        self._score_single_fold_from_arrays,
+                        repeat(feature_arrays, len(self._folds)),
                         repeat(feature_names, len(self._folds)),
                         self._folds,
                     ),
                 )
         return aggregate_subset_score(feature_names, fold_scores)
 
-    def _score_single_fold_from_shared_frame(
+    def _score_single_fold_from_arrays(
         self,
-        train_frame: pd.DataFrame,
+        feature_arrays: dict[str, np.ndarray],
         feature_names: list[str],
         fold: SelectionFold,
     ) -> FoldEconomicScore:
-        return self._score_single_fold(train_frame, feature_names, fold)
+        return self._score_single_fold(feature_arrays, feature_names, fold)
 
     def _score_single_fold(
         self,
-        train_frame: pd.DataFrame,
+        feature_arrays: dict[str, np.ndarray],
         feature_names: list[str],
         fold: SelectionFold,
     ) -> FoldEconomicScore:
+        fold_train, fold_validation = self._build_fold_frames(feature_arrays, feature_names, fold)
         return _score_validation_fold(
-            train_frame,
+            fold_train,
+            fold_validation,
             feature_names,
             fold,
             self._model_spec,
@@ -131,17 +143,33 @@ class BacktestFeatureSubsetScorer:
             self._cost_config,
         )
 
+    def _build_fold_frames(
+        self,
+        feature_arrays: dict[str, np.ndarray],
+        feature_names: list[str],
+        fold: SelectionFold,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        fold_context = self._fold_context_frames[fold.index]
+        fold_train_base = cast(pd.DataFrame, fold_context["train"])
+        fold_validation_base = cast(pd.DataFrame, fold_context["validation"])
+        fold_train = pd.DataFrame(fold_train_base.copy())
+        fold_validation = pd.DataFrame(fold_validation_base.copy())
+        for feature_name in feature_names:
+            feature_array = feature_arrays[feature_name]
+            fold_train[feature_name] = feature_array[fold.train_indices]
+            fold_validation[feature_name] = feature_array[fold.validation_indices]
+        return fold_train, fold_validation
+
 
 def _score_validation_fold(
-    train_frame: pd.DataFrame,
+    fold_train: pd.DataFrame,
+    fold_validation: pd.DataFrame,
     feature_names: list[str],
     fold: SelectionFold,
     model_spec: ModelSpec,
     backtest_config: BacktestConfig,
     cost_config: XtbCostConfig,
 ) -> FoldEconomicScore:
-    fold_train = pd.DataFrame(train_frame.take(fold.train_indices).reset_index(drop=True))
-    fold_validation = pd.DataFrame(train_frame.take(fold.validation_indices).reset_index(drop=True))
     artifact = fit_model(model_spec, fold_train, feature_names)
     predictions = predict_model(artifact, fold_validation, feature_names)
     predicted_validation = fold_validation.copy()

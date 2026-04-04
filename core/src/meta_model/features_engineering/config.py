@@ -21,10 +21,10 @@ OPEN_FEATURE_PREFIX: str = "open_"
 EARNINGS_FEATURE_PREFIX: str = "earnings_"
 SIGNAL_FEATURE_PREFIX: str = "signal_"
 INTERNAL_FEATURE_PREFIX: str = "_quant_internal_"
-FEATURE_LAG_WINDOWS: tuple[int, ...] = (1, 2, 3, 4, 5, 10, 21, 63)
-SLOW_FEATURE_LAG_WINDOWS: tuple[int, ...] = (1, 5, 10, 21, 63)
-COMPANY_FEATURE_LAG_WINDOWS: tuple[int, ...] = (1, 5, 21, 63)
-CALENDAR_SINCE_LAG_WINDOWS: tuple[int, ...] = (1, 5, 10, 21)
+FEATURE_LAG_WINDOWS: tuple[int, ...] = (1, 5, 21)
+SLOW_FEATURE_LAG_WINDOWS: tuple[int, ...] = (1, 21)
+COMPANY_FEATURE_LAG_WINDOWS: tuple[int, ...] = (1, 21)
+CALENDAR_SINCE_LAG_WINDOWS: tuple[int, ...] = (1, 5)
 NON_LAGGABLE_TA_PREFIXES: tuple[str, ...] = (
     f"{TA_FEATURE_PREFIX}volume_",
 )

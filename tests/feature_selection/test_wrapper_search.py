@@ -447,6 +447,7 @@ class TestWrapperSearch:
             scorer=slow_positive_scorer,
             config=FeatureSelectionConfig(
                 parallel_workers=4,
+                state_evaluation_workers=4,
                 null_bootstrap_count=0,
                 max_active_matrix_gib=1.0,
             ),

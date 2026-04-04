@@ -84,16 +84,16 @@ def bootstrap_rank_ic_objective_standard_error(
     window_std = np.asarray(fold_window_std, dtype=np.float64)
     rng = np.random.default_rng(random_seed)
     indices = np.arange(rank_ic.size, dtype=np.int64)
-    bootstrap_scores = np.empty(bootstrap_samples, dtype=np.float64)
-    for sample_index in range(bootstrap_samples):
-        sampled_indices = rng.choice(indices, size=rank_ic.size, replace=True)
-        aggregate = aggregate_fold_rank_ic(
-            rank_ic[sampled_indices].tolist(),
-            window_std[sampled_indices].tolist(),
-            stability_penalty_alpha=stability_penalty_alpha,
-            train_window_stability_alpha=train_window_stability_alpha,
-            complexity_penalty=0.0,
-            objective_standard_error=0.0,
-        )
-        bootstrap_scores[sample_index] = aggregate["objective_base_score"]
+    sampled_indices = rng.choice(
+        indices,
+        size=(bootstrap_samples, rank_ic.size),
+        replace=True,
+    )
+    sampled_rank_ic = rank_ic[sampled_indices]
+    sampled_window_std = window_std[sampled_indices]
+    bootstrap_scores = (
+        -sampled_rank_ic.mean(axis=1)
+        + stability_penalty_alpha * sampled_rank_ic.std(axis=1, ddof=0)
+        + train_window_stability_alpha * sampled_window_std.mean(axis=1)
+    )
     return float(bootstrap_scores.std(ddof=1))

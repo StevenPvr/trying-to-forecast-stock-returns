@@ -128,20 +128,27 @@ def run_target_distance_correlation_filter(
     )
     if not ranked_features:
         return [], empty_audit
-    train_frame = cache.build_feature_frame([])
+    sample_row_count = min(
+        cache.train_row_count,
+        max(1, config.target_distance_correlation_sample_size),
+    )
+    target_row_indices = np.arange(sample_row_count, dtype=np.int64)
+    train_frame = cache.build_feature_frame([], row_indices=target_row_indices)
     target_values = _resolve_distance_input(cast(pd.Series, train_frame[MODEL_TARGET_COLUMN]))
     worker_count = min(max(1, config.parallel_workers), len(ranked_features))
     LOGGER.info(
-        "Feature selection target correlation filter started: candidates=%d | threshold=%.4f | workers=%d",
+        "Feature selection target correlation filter started: candidates=%d | threshold=%.4f | workers=%d | sample_rows=%d",
         len(ranked_features),
         config.target_distance_correlation_threshold,
         worker_count,
+        sample_row_count,
     )
     rows = _score_target_distance_correlation_rows(
         cache,
         ranked_features,
         target_values,
         threshold=config.target_distance_correlation_threshold,
+        row_indices=target_row_indices,
     )
     audit = pd.DataFrame(rows).sort_values(
         ["passes_target_correlation", "target_distance_correlation", "feature_name"],
@@ -187,6 +194,7 @@ def _score_target_distance_correlation_rows(
     target_values: np.ndarray,
     *,
     threshold: float,
+    row_indices: np.ndarray,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for feature_name in feature_names:
@@ -196,6 +204,7 @@ def _score_target_distance_correlation_rows(
                 feature_name,
                 target_values,
                 threshold=threshold,
+                row_indices=row_indices,
             ),
         )
     return rows
@@ -207,8 +216,11 @@ def _score_single_target_distance_correlation(
     target_values: np.ndarray,
     *,
     threshold: float,
+    row_indices: np.ndarray,
 ) -> dict[str, object]:
-    feature_values = _resolve_distance_input_array(cache.get_feature_array(feature_name))
+    feature_values = _resolve_distance_input_array(
+        cache.get_feature_array_slice(feature_name, row_indices=row_indices),
+    )
     metric_value = _distance_correlation_numba_wrapper(feature_values, target_values)
     passes_threshold = metric_value > threshold
     return {
@@ -228,6 +240,7 @@ def _run_pruning_stages(
     stage_name: str,
     metric_builder: MetricBuilder,
 ) -> tuple[list[str], pd.DataFrame]:
+    rank_order = _build_sfi_rank_order(sfi_frame)
     audit_rows: list[dict[str, object]] = []
     stem_scopes = _build_stem_scopes(sfi_frame, feature_names)
     LOGGER.info(
@@ -245,6 +258,7 @@ def _run_pruning_stages(
         stage_name=stage_name,
         scope_level="stem",
         metric_builder=metric_builder,
+        rank_order=rank_order,
         audit_rows=audit_rows,
     )
     LOGGER.info(
@@ -269,6 +283,7 @@ def _run_pruning_stages(
         stage_name=stage_name,
         scope_level="family",
         metric_builder=metric_builder,
+        rank_order=rank_order,
         audit_rows=audit_rows,
     )
     LOGGER.info(
@@ -291,6 +306,7 @@ def _run_pruning_stages(
         stage_name=stage_name,
         scope_level="global",
         metric_builder=metric_builder,
+        rank_order=rank_order,
         audit_rows=audit_rows,
     )
     LOGGER.info(
@@ -313,13 +329,14 @@ def _prune_within_scopes(
     stage_name: str,
     scope_level: str,
     metric_builder: MetricBuilder,
+    rank_order: dict[str, int],
     audit_rows: list[dict[str, object]],
 ) -> list[str]:
     kept_by_scope: dict[str, list[str]] = {}
     completed_scopes = 0
     total_scopes = len(scopes)
     for scope_key in sorted(scopes):
-        scope_features = _rank_features_by_sfi(sfi_frame, scopes[scope_key])
+        scope_features = _rank_features_by_order(scopes[scope_key], rank_order)
         if len(scope_features) <= 1:
             kept_by_scope[scope_key] = scope_features
             audit_rows.extend(_build_singleton_audit_rows(scope_features, stage_name, scope_level, scope_key))
@@ -351,13 +368,13 @@ def _prune_within_scopes(
             len(scope_features),
         )
         kept_scope_features = _greedy_keep_scope(
-            sfi_frame,
             scope_features,
             metric_matrix,
             threshold=threshold,
             stage_name=stage_name,
             scope_level=scope_level,
             scope_key=scope_key,
+            rank_order=rank_order,
             audit_rows=audit_rows,
         )
         kept_by_scope[scope_key] = kept_scope_features
@@ -374,7 +391,7 @@ def _prune_within_scopes(
     retained: set[str] = set()
     for scope_features in kept_by_scope.values():
         retained.update(scope_features)
-    return _rank_features_by_sfi(sfi_frame, [feature_name for feature_name in feature_names if feature_name in retained])
+    return _rank_features_by_order([feature_name for feature_name in feature_names if feature_name in retained], rank_order)
 
 
 def _build_singleton_audit_rows(
@@ -399,7 +416,6 @@ def _build_singleton_audit_rows(
 
 
 def _greedy_keep_scope(
-    sfi_frame: pd.DataFrame,
     scope_features: list[str],
     metric_matrix: pd.DataFrame,
     *,
@@ -407,6 +423,7 @@ def _greedy_keep_scope(
     stage_name: str,
     scope_level: str,
     scope_key: str,
+    rank_order: dict[str, int],
     audit_rows: list[dict[str, object]],
 ) -> list[str]:
     kept: list[str] = []
@@ -428,7 +445,7 @@ def _greedy_keep_scope(
                 metric_value,
             ),
         )
-    return _rank_features_by_sfi(sfi_frame, kept)
+    return _rank_features_by_order(kept, rank_order)
 
 
 def _find_matching_representative(
@@ -507,6 +524,24 @@ def _log_scope_progress(
         scope_feature_count,
         kept_feature_count,
         max(0, scope_feature_count - kept_feature_count),
+    )
+
+
+def _build_sfi_rank_order(sfi_frame: pd.DataFrame) -> dict[str, int]:
+    ordered_feature_names = _rank_features_by_sfi(
+        sfi_frame,
+        [str(feature_name) for feature_name in cast(pd.Series, sfi_frame["feature_name"]).tolist()],
+    )
+    return {feature_name: rank_index for rank_index, feature_name in enumerate(ordered_feature_names)}
+
+
+def _rank_features_by_order(
+    feature_names: list[str],
+    rank_order: dict[str, int],
+) -> list[str]:
+    return sorted(
+        feature_names,
+        key=lambda feature_name: (rank_order.get(feature_name, len(rank_order)), feature_name),
     )
 
 

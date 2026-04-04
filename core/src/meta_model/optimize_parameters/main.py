@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, TypedDict, cast
+from typing import Any, Callable, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -27,6 +27,10 @@ from core.src.meta_model.data.paths import (
     XGBOOST_OPTUNA_TRIALS_PARQUET,
 )
 from core.src.meta_model.overfitting import estimate_probability_of_backtest_overfitting
+from core.src.meta_model.optimize_parameters.acceleration import (
+    AccelerationPlan,
+    resolve_acceleration_plan,
+)
 from core.src.meta_model.optimize_parameters.config import OptimizationConfig, OPTUNA_STUDY_NAME
 from core.src.meta_model.optimize_parameters.cv import WalkForwardFold, build_walk_forward_folds
 from core.src.meta_model.optimize_parameters.dataset import (
@@ -34,28 +38,37 @@ from core.src.meta_model.optimize_parameters.dataset import (
     build_optimization_dataset_bundle,
     load_preprocessed_dataset,
 )
+from core.src.meta_model.optimize_parameters.fold_matrix_cache import (
+    CachedFoldMatrixBundle,
+    build_fold_matrix_cache,
+)
+from core.src.meta_model.optimize_parameters.fold_context import (
+    FoldEvaluationContext,
+    build_fold_evaluation_contexts,
+)
 from core.src.meta_model.optimize_parameters.io import save_optimization_outputs
+from core.src.meta_model.optimize_parameters.metric_context import (
+    compute_mean_daily_rank_ic_from_context,
+)
 from core.src.meta_model.optimize_parameters.objective import (
     aggregate_fold_rank_ic,
     bootstrap_rank_ic_objective_standard_error,
 )
 from core.src.meta_model.optimize_parameters.parallelism import ParallelismPlan, resolve_parallelism
-from core.src.meta_model.optimize_parameters.robustness import (
-    build_train_windows,
-    compute_complexity_penalty,
-)
+from core.src.meta_model.optimize_parameters.robustness import compute_complexity_penalty
 from core.src.meta_model.optimize_parameters.search_space import (
     load_optuna_module,
     load_xgboost_module,
     suggest_xgboost_params,
 )
 from core.src.meta_model.optimize_parameters.selection import select_one_standard_error_trial
-from core.src.meta_model.research_metrics import compute_mean_daily_spearman_ic
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
+DEFAULT_OPTIMIZATION_DATASET_PATH: Path = Path("/teamspace/uploads/dataset_preprocessed_2009_2025.parquet")
 _process_fold_dataset_bundle: OptimizationDatasetBundle | None = None
 _process_fold_booster_params: dict[str, Any] | None = None
 _process_fold_optimization_config: OptimizationConfig | None = None
+_process_fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None = None
 
 
 class OverfittingReportPayload(TypedDict):
@@ -87,21 +100,24 @@ def _install_process_fold_context(
     dataset_bundle: OptimizationDatasetBundle,
     booster_params: dict[str, Any],
     optimization_config: OptimizationConfig,
+    fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None,
 ) -> None:
-    global _process_fold_dataset_bundle, _process_fold_booster_params, _process_fold_optimization_config
+    global _process_fold_dataset_bundle, _process_fold_booster_params, _process_fold_optimization_config, _process_fold_matrix_cache_by_index
     _process_fold_dataset_bundle = dataset_bundle
     _process_fold_booster_params = booster_params
     _process_fold_optimization_config = optimization_config
+    _process_fold_matrix_cache_by_index = fold_matrix_cache_by_index
 
 
 def _clear_process_fold_context() -> None:
-    global _process_fold_dataset_bundle, _process_fold_booster_params, _process_fold_optimization_config
+    global _process_fold_dataset_bundle, _process_fold_booster_params, _process_fold_optimization_config, _process_fold_matrix_cache_by_index
     _process_fold_dataset_bundle = None
     _process_fold_booster_params = None
     _process_fold_optimization_config = None
+    _process_fold_matrix_cache_by_index = None
 
 
-def _evaluate_single_fold_in_process(fold: WalkForwardFold) -> dict[str, Any]:
+def _evaluate_single_fold_in_process(fold_context: FoldEvaluationContext) -> dict[str, Any]:
     if (
         _process_fold_dataset_bundle is None
         or _process_fold_booster_params is None
@@ -110,57 +126,66 @@ def _evaluate_single_fold_in_process(fold: WalkForwardFold) -> dict[str, Any]:
         raise RuntimeError("Optimize-parameters process fold context is not installed.")
     return _evaluate_single_fold(
         _process_fold_dataset_bundle,
-        fold,
+        fold_context,
         _process_fold_booster_params,
         _process_fold_optimization_config,
+        _process_fold_matrix_cache_by_index,
     )
 
 
 def _evaluate_single_fold(
     dataset_bundle: OptimizationDatasetBundle,
-    fold: WalkForwardFold,
+    fold_context: FoldEvaluationContext,
     booster_params: dict[str, Any],
     optimization_config: OptimizationConfig,
+    fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None = None,
 ) -> dict[str, Any]:
     xgb = load_xgboost_module()
+    cached_fold = None
+    if fold_matrix_cache_by_index is not None:
+        cached_fold = fold_matrix_cache_by_index.get(fold_context.fold.index)
+    active_fold_context = cached_fold.fold_context if cached_fold is not None else fold_context
+    fold = active_fold_context.fold
     feature_columns = dataset_bundle.feature_columns
-    validation_dates = np.asarray(
-        pd.to_datetime(
-            cast(pd.Series, dataset_bundle.metadata.iloc[fold.validation_indices]["date"]),
-        ),
-    )
-    validation_matrix = xgb.DMatrix(
-        np.ascontiguousarray(dataset_bundle.feature_matrix[fold.validation_indices]),
-        label=np.ascontiguousarray(dataset_bundle.target_array[fold.validation_indices]),
-        feature_names=feature_columns,
-    )
+    if cached_fold is not None:
+        validation_matrix = cached_fold.validation_matrix
+    else:
+        validation_matrix = xgb.DMatrix(
+            np.ascontiguousarray(dataset_bundle.feature_matrix[fold.validation_indices]),
+            label=np.ascontiguousarray(dataset_bundle.target_array[fold.validation_indices]),
+            feature_names=feature_columns,
+        )
 
     def _daily_rank_ic_metric(predictions: np.ndarray, dmatrix: Any) -> tuple[str, float]:
-        labels = np.asarray(dmatrix.get_label(), dtype=np.float64)
+        del dmatrix
         return (
             "daily_rank_ic",
-            compute_mean_daily_spearman_ic(
+            compute_mean_daily_rank_ic_from_context(
                 np.asarray(predictions, dtype=np.float64),
-                labels,
-                validation_dates,
+                active_fold_context.validation_rank_ic_context,
             ),
         )
 
-    train_windows = build_train_windows(
-        dataset_bundle.metadata,
-        fold.train_indices,
-        random_seed=optimization_config.random_seed + fold.index,
-        recent_tail_fraction=optimization_config.recent_train_tail_fraction,
-        random_window_count=optimization_config.random_train_window_count,
-        random_window_min_fraction=optimization_config.random_train_window_min_fraction,
-    )
     window_rows: list[dict[str, Any]] = []
-    for train_window in train_windows:
-        train_matrix = xgb.DMatrix(
-            np.ascontiguousarray(dataset_bundle.feature_matrix[train_window.train_indices]),
-            label=np.ascontiguousarray(dataset_bundle.target_array[train_window.train_indices]),
-            feature_names=feature_columns,
-        )
+    for train_window in active_fold_context.train_windows:
+        train_matrix: Any
+        train_window_label = train_window.label
+        train_window_coverage = train_window.coverage_fraction
+        if cached_fold is not None:
+            cached_train_window = next(
+                cached
+                for cached in cached_fold.train_windows
+                if cached.label == train_window.label
+            )
+            train_matrix = cached_train_window.train_matrix
+            train_window_label = cached_train_window.label
+            train_window_coverage = cached_train_window.coverage_fraction
+        else:
+            train_matrix = xgb.DMatrix(
+                np.ascontiguousarray(dataset_bundle.feature_matrix[train_window.train_indices]),
+                label=np.ascontiguousarray(dataset_bundle.target_array[train_window.train_indices]),
+                feature_names=feature_columns,
+            )
         evaluation_history: dict[str, dict[str, list[float]]] = {}
         booster = xgb.train(
             params=booster_params,
@@ -182,16 +207,18 @@ def _evaluate_single_fold(
             verbose_eval=False,
         )
         window_rows.append({
-            "label": train_window.label,
+            "label": train_window_label,
             "daily_rank_ic": float(booster.best_score),
             "best_iteration": int(booster.best_iteration),
-            "coverage_fraction": train_window.coverage_fraction,
+            "coverage_fraction": train_window_coverage,
         })
-        del train_matrix
+        if cached_fold is None:
+            del train_matrix
         del booster
         del evaluation_history
 
-    del validation_matrix
+    if cached_fold is None:
+        del validation_matrix
     gc.collect()
 
     window_rank_ic = np.asarray([row["daily_rank_ic"] for row in window_rows], dtype=np.float64)
@@ -218,20 +245,22 @@ def _evaluate_single_fold(
 
 def _evaluate_trial_folds(
     dataset_bundle: OptimizationDatasetBundle,
-    folds: list[WalkForwardFold],
+    fold_contexts: list[FoldEvaluationContext],
     booster_params: dict[str, Any],
     optimization_config: OptimizationConfig,
     parallelism_plan: ParallelismPlan,
+    fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None = None,
 ) -> list[dict[str, Any]]:
-    if parallelism_plan.fold_workers <= 1 or len(folds) <= 1:
+    if parallelism_plan.fold_workers <= 1 or len(fold_contexts) <= 1:
         results = [
             _evaluate_single_fold(
                 dataset_bundle,
-                fold,
+                fold_context,
                 booster_params,
                 optimization_config,
+                fold_matrix_cache_by_index,
             )
-            for fold in folds
+            for fold_context in fold_contexts
         ]
         return sorted(results, key=lambda row: int(row["fold_index"]))
     if _process_pool_available():
@@ -240,13 +269,18 @@ def _evaluate_trial_folds(
             parallelism_plan.fold_workers,
             parallelism_plan.threads_per_fold,
         )
-        _install_process_fold_context(dataset_bundle, booster_params, optimization_config)
+        _install_process_fold_context(
+            dataset_bundle,
+            booster_params,
+            optimization_config,
+            fold_matrix_cache_by_index,
+        )
         try:
             return _evaluate_trial_folds_in_process_pool(
-                folds,
+                fold_contexts,
                 parallelism_plan=parallelism_plan,
             )
-        except (NotImplementedError, OSError, PermissionError) as error:
+        except (NotImplementedError, OSError) as error:
             LOGGER.warning(
                 "Fold evaluation process backend unavailable (%s); falling back to threads.",
                 error,
@@ -260,15 +294,16 @@ def _evaluate_trial_folds(
     )
     return _evaluate_trial_folds_in_thread_pool(
         dataset_bundle,
-        folds,
+        fold_contexts,
         booster_params,
         optimization_config,
         parallelism_plan=parallelism_plan,
+        fold_matrix_cache_by_index=fold_matrix_cache_by_index,
     )
 
 
 def _evaluate_trial_folds_in_process_pool(
-    folds: list[WalkForwardFold],
+    fold_contexts: list[FoldEvaluationContext],
     *,
     parallelism_plan: ParallelismPlan,
 ) -> list[dict[str, Any]]:
@@ -278,8 +313,8 @@ def _evaluate_trial_folds_in_process_pool(
         mp_context=process_context,
     ) as executor:
         futures = [
-            executor.submit(_evaluate_single_fold_in_process, fold)
-            for fold in folds
+            executor.submit(_evaluate_single_fold_in_process, fold_context)
+            for fold_context in fold_contexts
         ]
         results = [future.result() for future in futures]
     return sorted(results, key=lambda row: int(row["fold_index"]))
@@ -287,22 +322,24 @@ def _evaluate_trial_folds_in_process_pool(
 
 def _evaluate_trial_folds_in_thread_pool(
     dataset_bundle: OptimizationDatasetBundle,
-    folds: list[WalkForwardFold],
+    fold_contexts: list[FoldEvaluationContext],
     booster_params: dict[str, Any],
     optimization_config: OptimizationConfig,
     *,
     parallelism_plan: ParallelismPlan,
+    fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None = None,
 ) -> list[dict[str, Any]]:
     with ThreadPoolExecutor(max_workers=parallelism_plan.fold_workers) as executor:
         futures = [
             executor.submit(
                 _evaluate_single_fold,
                 dataset_bundle,
-                fold,
+                fold_context,
                 booster_params,
                 optimization_config,
+                fold_matrix_cache_by_index,
             )
-            for fold in folds
+            for fold_context in fold_contexts
         ]
         results = [future.result() for future in futures]
     return sorted(results, key=lambda row: int(row["fold_index"]))
@@ -310,23 +347,28 @@ def _evaluate_trial_folds_in_thread_pool(
 
 def _build_optuna_objective(
     dataset_bundle: OptimizationDatasetBundle,
-    folds: list[WalkForwardFold],
+    fold_contexts: list[FoldEvaluationContext],
     optimization_config: OptimizationConfig,
     parallelism_plan: ParallelismPlan,
+    acceleration_plan: AccelerationPlan,
+    fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None,
 ):
     def objective(trial: Any) -> float:
         booster_params = suggest_xgboost_params(
             trial,
             threads_per_fold=parallelism_plan.threads_per_fold,
             random_seed=optimization_config.random_seed,
+            accelerator=acceleration_plan.accelerator,
+            gpu_device_id=acceleration_plan.gpu_device_id,
         )
         started_at = time.perf_counter()
         fold_results = _evaluate_trial_folds(
             dataset_bundle,
-            folds,
+            fold_contexts,
             booster_params,
             optimization_config,
             parallelism_plan,
+            fold_matrix_cache_by_index,
         )
         complexity_penalty = compute_complexity_penalty(
             max_depth=int(booster_params["max_depth"]),
@@ -500,7 +542,14 @@ def _resolve_save_outputs_fn(
 def _load_dataset_bundle_with_plan(
     dataset_path: Path,
     config: OptimizationConfig,
-) -> tuple[OptimizationDatasetBundle, list[str], list[WalkForwardFold], ParallelismPlan]:
+    accelerator: str,
+) -> tuple[
+    OptimizationDatasetBundle,
+    list[str],
+    list[WalkForwardFold],
+    list[FoldEvaluationContext],
+    ParallelismPlan,
+]:
     data = load_preprocessed_dataset(dataset_path)
     dataset_bundle = build_optimization_dataset_bundle(data, dataset_path)
     del data
@@ -510,12 +559,18 @@ def _load_dataset_bundle_with_plan(
         fold_count=config.fold_count,
         target_horizon_days=config.target_horizon_days,
     )
+    fold_contexts = build_fold_evaluation_contexts(
+        dataset_bundle,
+        folds,
+        config,
+    )
     parallelism_plan = resolve_parallelism(
         None,
         config.fold_count,
         dataset_bundle.feature_matrix.nbytes,
+        accelerator=accelerator,
     )
-    return dataset_bundle, feature_columns, folds, parallelism_plan
+    return dataset_bundle, feature_columns, folds, fold_contexts, parallelism_plan
 
 
 def _log_optimization_plan(
@@ -524,6 +579,7 @@ def _log_optimization_plan(
     folds: list[WalkForwardFold],
     parallelism_plan: ParallelismPlan,
     config: OptimizationConfig,
+    acceleration_plan: AccelerationPlan,
 ) -> None:
     feature_matrix_mb = dataset_bundle.feature_matrix.nbytes / (1024.0 * 1024.0)
     LOGGER.info(
@@ -534,13 +590,23 @@ def _log_optimization_plan(
         parallelism_plan.threads_per_fold,
     )
     LOGGER.info(
-        "Starting XGBoost Optuna optimization on %d rows x %d features | folds=%d | fold_workers=%d | threads/fold=%d | trials=%d",
+        "Starting XGBoost Optuna optimization on %d rows x %d features | folds=%d | fold_workers=%d | threads/fold=%d | trials=%d | accelerator=%s",
         len(dataset_bundle.metadata),
         len(feature_columns),
         len(folds),
         parallelism_plan.fold_workers,
         parallelism_plan.threads_per_fold,
         config.trial_count,
+        acceleration_plan.accelerator,
+    )
+    LOGGER.info(
+        "Acceleration plan: requested=%s | resolved=%s | gpu_device_id=%d | gpu_name=%s | reason=%s | gpu_matrix_cache=%s",
+        acceleration_plan.requested_accelerator,
+        acceleration_plan.accelerator,
+        acceleration_plan.gpu_device_id,
+        acceleration_plan.gpu_name or "n/a",
+        acceleration_plan.reason,
+        acceleration_plan.use_gpu_matrix_cache,
     )
     for fold in folds:
         LOGGER.info(
@@ -558,9 +624,11 @@ def _log_optimization_plan(
 
 def _run_optuna_study(
     dataset_bundle: OptimizationDatasetBundle,
-    folds: list[WalkForwardFold],
+    fold_contexts: list[FoldEvaluationContext],
     config: OptimizationConfig,
     parallelism_plan: ParallelismPlan,
+    acceleration_plan: AccelerationPlan,
+    fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None,
     study_name: str,
 ) -> Any:
     optuna = load_optuna_module()
@@ -573,9 +641,11 @@ def _run_optuna_study(
     study.optimize(
         _build_optuna_objective(
             dataset_bundle,
-            folds,
+            fold_contexts,
             config,
             parallelism_plan,
+            acceleration_plan,
+            fold_matrix_cache_by_index,
         ),
         n_trials=config.trial_count,
         n_jobs=1,
@@ -590,6 +660,7 @@ def _build_best_payload(
     selected_trial: Any,
     parallelism_plan: ParallelismPlan,
     config: OptimizationConfig,
+    acceleration_plan: AccelerationPlan,
     *,
     feature_count: int,
     study_name: str,
@@ -605,11 +676,12 @@ def _build_best_payload(
             "complexity_penalty": selected_trial.complexity_penalty,
             "params": {
                 column.removeprefix("param_"): selected_trial.row[column]
-                for column in cast(list[str], trials_frame.columns.tolist())
+                for column in trials_frame.columns.tolist()
                 if column.startswith("param_")
             },
         },
         "parallelism": asdict(parallelism_plan),
+        "acceleration": asdict(acceleration_plan),
         "config": asdict(config),
         "feature_count": feature_count,
         "study_name": study_name,
@@ -639,6 +711,8 @@ def optimize_xgboost_parameters(
     best_params_path: Path | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     config = optimization_config or OptimizationConfig()
+    xgb_module = load_xgboost_module()
+    acceleration_plan = resolve_acceleration_plan(config, xgb_module=xgb_module)
     save_outputs = _resolve_save_outputs_fn(
         save_outputs_fn,
         trials_parquet_path=trials_parquet_path,
@@ -646,9 +720,16 @@ def optimize_xgboost_parameters(
         best_params_path=best_params_path,
     )
     started_at = time.perf_counter()
-    dataset_bundle, feature_columns, folds, parallelism_plan = _load_dataset_bundle_with_plan(
+    dataset_bundle, feature_columns, folds, fold_contexts, parallelism_plan = _load_dataset_bundle_with_plan(
         dataset_path,
         config,
+        acceleration_plan.accelerator,
+    )
+    fold_matrix_cache_by_index = build_fold_matrix_cache(
+        dataset_bundle,
+        fold_contexts,
+        xgb_module=xgb_module,
+        enabled=acceleration_plan.accelerator == "cuda" and acceleration_plan.use_gpu_matrix_cache,
     )
     _log_optimization_plan(
         dataset_bundle,
@@ -656,12 +737,15 @@ def optimize_xgboost_parameters(
         folds,
         parallelism_plan,
         config,
+        acceleration_plan,
     )
     study = _run_optuna_study(
         dataset_bundle,
-        folds,
+        fold_contexts,
         config,
         parallelism_plan,
+        acceleration_plan,
+        fold_matrix_cache_by_index,
         study_name,
     )
     trials_frame = _study_to_frame(study)
@@ -672,6 +756,7 @@ def optimize_xgboost_parameters(
         selected_trial,
         parallelism_plan,
         config,
+        acceleration_plan,
         feature_count=len(feature_columns),
         study_name=study_name,
     )
@@ -689,7 +774,7 @@ def optimize_xgboost_parameters(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    optimize_xgboost_parameters()
+    optimize_xgboost_parameters(dataset_path=DEFAULT_OPTIMIZATION_DATASET_PATH)
 
 
 if __name__ == "__main__":

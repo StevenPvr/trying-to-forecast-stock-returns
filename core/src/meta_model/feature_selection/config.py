@@ -28,9 +28,8 @@ DEFAULT_DISTANCE_CORRELATION_THRESHOLD: float = 0.80
 DEFAULT_DISTANCE_CORRELATION_SAMPLE_SIZE: int = 512
 DEFAULT_DISTANCE_CORRELATION_MAX_FEATURES: int = 384
 DEFAULT_TARGET_DISTANCE_CORRELATION_THRESHOLD: float = 0.005
+DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE: int = 512
 DEFAULT_TRAIN_SAMPLING_FRACTION: float = 0.20
-DEFAULT_MDA_MAX_FEATURES: int | None = None
-DEFAULT_MDA_PERMUTATION_REPEATS: int = 3
 
 
 def _default_parallel_workers() -> int:
@@ -83,9 +82,8 @@ class FeatureSelectionConfig:
     distance_correlation_sample_size: int = DEFAULT_DISTANCE_CORRELATION_SAMPLE_SIZE
     distance_correlation_max_features: int = DEFAULT_DISTANCE_CORRELATION_MAX_FEATURES
     target_distance_correlation_threshold: float = DEFAULT_TARGET_DISTANCE_CORRELATION_THRESHOLD
+    target_distance_correlation_sample_size: int = DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE
     train_sampling_fraction: float = DEFAULT_TRAIN_SAMPLING_FRACTION
-    mda_max_features: int | None = DEFAULT_MDA_MAX_FEATURES
-    mda_permutation_repeats: int = DEFAULT_MDA_PERMUTATION_REPEATS
     emit_input_inventory: bool = DEFAULT_EMIT_INPUT_INVENTORY
 
     def resolved_state_evaluation_workers(self, *, fold_count: int) -> int:
@@ -94,15 +92,15 @@ class FeatureSelectionConfig:
             raise ValueError("parallel_workers must be strictly positive.")
         if self.state_evaluation_workers is not None:
             return min(max(1, self.state_evaluation_workers), self.parallel_workers)
-        return self.parallel_workers
+        return 1
 
     def resolved_fold_parallel_workers(self, *, fold_count: int) -> int:
         state_workers = self.resolved_state_evaluation_workers(fold_count=fold_count)
-        if state_workers > 1:
-            return 1
-        return min(fold_count, max(1, self.parallel_workers))
+        per_state_budget = max(1, self.parallel_workers // max(1, state_workers))
+        return min(max(1, fold_count), per_state_budget)
 
     def resolved_model_threads_per_worker(self, *, fold_count: int) -> int:
         state_workers = self.resolved_state_evaluation_workers(fold_count=fold_count)
         fold_workers = self.resolved_fold_parallel_workers(fold_count=fold_count)
-        return max(1, self.parallel_workers // max(1, state_workers * fold_workers))
+        per_state_budget = max(1, self.parallel_workers // max(1, state_workers))
+        return max(1, per_state_budget // max(1, fold_workers))

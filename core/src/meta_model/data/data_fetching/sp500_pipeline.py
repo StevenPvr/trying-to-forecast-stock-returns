@@ -29,7 +29,9 @@ from core.src.meta_model.data.constants import (
     WIKIPEDIA_SP500_URL,
     XTB_DEFAULT_MAX_SPREAD_BPS,
 )
+from core.src.meta_model.data.data_fetching.yfinance_download_lock import YFINANCE_DOWNLOAD_LOCK
 from core.src.meta_model.data.paths import DATA_FETCHING_DIR, OUTPUT_PARQUET, OUTPUT_SAMPLE_CSV
+from core.src.meta_model.data.trading_calendar import get_nyse_sessions
 from core.src.meta_model.runtime_parallelism import resolve_executor_worker_count
 
 try:
@@ -315,15 +317,16 @@ def _fetch_yfinance_batch(
     if yf is None:
         raise ImportError("yfinance is not installed")
 
-    raw: pd.DataFrame | None = yf.download(
-        symbols,
-        start=start_date,
-        end=end_date,
-        progress=False,
-        group_by="column",
-        auto_adjust=False,
-        threads=False,
-    )
+    with YFINANCE_DOWNLOAD_LOCK:
+        raw: pd.DataFrame | None = yf.download(
+            symbols,
+            start=start_date,
+            end=end_date,
+            progress=False,
+            group_by="column",
+            auto_adjust=False,
+            threads=False,
+        )
 
     if raw is None or raw.empty:
         return {}
@@ -419,10 +422,10 @@ def _fetch_chunk_with_retry(
     while attempts < config.max_retries:
         try:
             batch_results = _fetch_yfinance_batch(batch, start_date, end_date)
-            return {
-                symbol_lookup.get(yf_sym, yf_sym): df
-                for yf_sym, df in batch_results.items()
-            }
+            resolved_pairs: list[tuple[str, pd.DataFrame]] = [
+                (symbol_lookup.get(yf_sym, yf_sym), df) for yf_sym, df in list(batch_results.items())
+            ]
+            return dict(resolved_pairs)
         except Exception as exc:  # noqa: BLE001 - external API
             attempts += 1
             LOGGER.warning(
@@ -712,8 +715,6 @@ def build_dataset(config: PipelineConfig) -> pd.DataFrame:
     price_map: dict[str, pd.DataFrame] = _fetch_prices(
         symbols, config.start_date, config.end_date, config
     )
-
-    from core.src.meta_model.data.trading_calendar import get_nyse_sessions
 
     full_index: pd.DatetimeIndex = get_nyse_sessions(start_date, end_date)
     rows: list[pd.DataFrame] = []

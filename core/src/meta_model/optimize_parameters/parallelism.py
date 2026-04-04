@@ -34,9 +34,16 @@ def resolve_parallelism(
     total_cores: int | None,
     fold_count: int,
     feature_matrix_bytes: int | None = None,
+    accelerator: str = "cpu",
 ) -> ParallelismPlan:
     detected_cores = total_cores if total_cores is not None else resolve_available_cpu_count()
     usable_cores = max(1, int(detected_cores))
+    if accelerator == "cuda":
+        return ParallelismPlan(
+            total_cores=usable_cores,
+            fold_workers=1,
+            threads_per_fold=usable_cores,
+        )
     fold_workers = _resolve_memory_safe_fold_workers(
         usable_cores=usable_cores,
         fold_count=fold_count,

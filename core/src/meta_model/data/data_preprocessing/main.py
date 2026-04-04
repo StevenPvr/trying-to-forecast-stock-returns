@@ -85,6 +85,14 @@ from core.src.meta_model.model_contract import (
     REALIZED_RETURN_COLUMN,
     SHORT_HOLD_NET_RETURN_COLUMN,
     INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN,
+    INTRADAY_GROSS_RETURN_COLUMN,
+    WEEK_HOLD_BENCHMARK_RETURN_COLUMN,
+    WEEK_HOLD_CS_RANK_TARGET_COLUMN,
+    WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN,
+    WEEK_HOLD_EXCESS_RETURN_COLUMN,
+    WEEK_HOLD_GROSS_RETURN_COLUMN,
+    WEEK_HOLD_NET_RETURN_COLUMN,
+    WEEK_HOLD_SECTOR_RESIDUAL_RETURN_COLUMN,
 )
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -109,12 +117,19 @@ TEST_START_DATE: date = date(2022, 2, 1)
 TARGET_RELATED_COLUMNS: tuple[str, ...] = (
     TARGET_COLUMN,
     REALIZED_RETURN_COLUMN,
+    INTRADAY_GROSS_RETURN_COLUMN,
     INTRADAY_NET_RETURN_COLUMN,
     INTRADAY_BENCHMARK_RETURN_COLUMN,
     INTRADAY_EXCESS_RETURN_COLUMN,
     INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN,
     INTRADAY_CS_ZSCORE_TARGET_COLUMN,
     INTRADAY_CS_RANK_TARGET_COLUMN,
+    WEEK_HOLD_NET_RETURN_COLUMN,
+    WEEK_HOLD_BENCHMARK_RETURN_COLUMN,
+    WEEK_HOLD_EXCESS_RETURN_COLUMN,
+    WEEK_HOLD_SECTOR_RESIDUAL_RETURN_COLUMN,
+    WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN,
+    WEEK_HOLD_CS_RANK_TARGET_COLUMN,
     OVERNIGHT_NET_RETURN_COLUMN,
     SHORT_HOLD_NET_RETURN_COLUMN,
     MEDIUM_HOLD_GROSS_RETURN_COLUMN,
@@ -152,6 +167,12 @@ def create_target_main_group(
     horizon_days: int = TARGET_HORIZON_DAYS,
     execution_lag_days: int = TARGET_EXECUTION_LAG_DAYS,
 ) -> pd.DataFrame:
+    """Attach forward returns; row ``date`` is execution day J (see ``model_contract``).
+
+    Week label uses open(J + ``execution_lag_days``). With the default
+    ``execution_lag_days == 1``, row ``date`` is the signal day and entry is next
+    session open. Features must be aligned to what is known at decision time.
+    """
     ticker_group: pd.DataFrame = group.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
     if ticker_group.empty:
         return ticker_group
@@ -171,10 +192,14 @@ def create_target_main_group(
     medium_exit_open = pd.Series(
         ticker_group["stock_open_price"].shift(-(execution_lag_days + horizon_days)),
     )
+    week_exit_close = pd.Series(
+        ticker_group["stock_close_price"].shift(-(execution_lag_days + horizon_days)),
+    )
     intraday_gross_return = np.log(entry_close / entry_open)
     overnight_gross_return = np.log(next_open / entry_close)
     short_hold_gross_return = np.log(short_exit_close / entry_open)
     medium_hold_gross_return = np.log(medium_exit_open / entry_open)
+    week_hold_gross_return = np.log(week_exit_close / entry_open)
 
     def _cost_rate(
         trade_date: pd.Timestamp,
@@ -191,14 +216,18 @@ def create_target_main_group(
     overnight_cost = _map_trade_costs(trade_dates, _cost_rate, 1)
     short_hold_cost = _map_trade_costs(trade_dates, _cost_rate, 1)
     medium_hold_cost = _map_trade_costs(trade_dates, _cost_rate, horizon_days)
+    week_hold_cost = _map_trade_costs(trade_dates, _cost_rate, horizon_days)
 
-    ticker_group[TARGET_COLUMN] = intraday_gross_return
-    ticker_group[REALIZED_RETURN_COLUMN] = intraday_gross_return
+    ticker_group[INTRADAY_GROSS_RETURN_COLUMN] = intraday_gross_return
+    ticker_group[TARGET_COLUMN] = week_hold_gross_return
+    ticker_group[REALIZED_RETURN_COLUMN] = week_hold_gross_return
     ticker_group[INTRADAY_NET_RETURN_COLUMN] = intraday_gross_return - intraday_cost
     ticker_group[OVERNIGHT_NET_RETURN_COLUMN] = overnight_gross_return - overnight_cost
     ticker_group[SHORT_HOLD_NET_RETURN_COLUMN] = short_hold_gross_return - short_hold_cost
     ticker_group[MEDIUM_HOLD_GROSS_RETURN_COLUMN] = medium_hold_gross_return
     ticker_group[MEDIUM_HOLD_NET_RETURN_COLUMN] = medium_hold_gross_return - medium_hold_cost
+    ticker_group[WEEK_HOLD_GROSS_RETURN_COLUMN] = week_hold_gross_return
+    ticker_group[WEEK_HOLD_NET_RETURN_COLUMN] = week_hold_gross_return - week_hold_cost
     return ticker_group
 
 
@@ -211,28 +240,66 @@ def _build_sector_key(data: pd.DataFrame) -> pd.Series:
     )
 
 
-def build_target_metric_panel(data: pd.DataFrame) -> pd.DataFrame:
-    benchmark_forward_return = data.groupby("date")[INTRADAY_NET_RETURN_COLUMN].transform("mean")
-    excess_forward_return = data[INTRADAY_NET_RETURN_COLUMN] - benchmark_forward_return
-    daily_std = data.groupby("date")[INTRADAY_NET_RETURN_COLUMN].transform("std")
+def _build_cross_sectional_metrics(
+    data: pd.DataFrame,
+    *,
+    net_return_column: str,
+    benchmark_column: str,
+    excess_column: str,
+    sector_residual_column: str,
+    zscore_column: str,
+    rank_column: str,
+) -> pd.DataFrame:
+    benchmark_forward_return = data.groupby("date")[net_return_column].transform("mean")
+    excess_forward_return = data[net_return_column] - benchmark_forward_return
+    daily_std = data.groupby("date")[net_return_column].transform("std")
     safe_daily_std = pd.Series(daily_std.replace(0.0, np.nan))
-    cs_rank = data.groupby("date")[INTRADAY_NET_RETURN_COLUMN].rank(method="average", pct=True) - 0.5
+    cs_rank = data.groupby("date")[net_return_column].rank(method="average", pct=True) - 0.5
     sector_key = _build_sector_key(data)
-    sector_mean = data.groupby([pd.to_datetime(data["date"]), sector_key])[INTRADAY_NET_RETURN_COLUMN].transform("mean")
+    sector_mean = data.groupby([pd.to_datetime(data["date"]), sector_key])[net_return_column].transform(
+        "mean",
+    )
 
     return pd.DataFrame(
         {
             "date": pd.to_datetime(data["date"]),
             "ticker": data["ticker"].astype(str),
-            INTRADAY_BENCHMARK_RETURN_COLUMN: benchmark_forward_return,
-            INTRADAY_EXCESS_RETURN_COLUMN: excess_forward_return,
-            INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN: data[INTRADAY_NET_RETURN_COLUMN] - sector_mean,
-            INTRADAY_CS_ZSCORE_TARGET_COLUMN: (
-                excess_forward_return / safe_daily_std
-            ).replace([np.inf, -np.inf], np.nan).fillna(0.0),
-            INTRADAY_CS_RANK_TARGET_COLUMN: pd.Series(cs_rank).fillna(0.0),
+            benchmark_column: benchmark_forward_return,
+            excess_column: excess_forward_return,
+            sector_residual_column: data[net_return_column] - sector_mean,
+            zscore_column: (
+                (excess_forward_return / safe_daily_std).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            ),
+            rank_column: pd.Series(cs_rank).fillna(0.0),
         },
     )
+
+
+def build_target_metric_panel(data: pd.DataFrame) -> pd.DataFrame:
+    intraday_metrics = _build_cross_sectional_metrics(
+        data,
+        net_return_column=INTRADAY_NET_RETURN_COLUMN,
+        benchmark_column=INTRADAY_BENCHMARK_RETURN_COLUMN,
+        excess_column=INTRADAY_EXCESS_RETURN_COLUMN,
+        sector_residual_column=INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN,
+        zscore_column=INTRADAY_CS_ZSCORE_TARGET_COLUMN,
+        rank_column=INTRADAY_CS_RANK_TARGET_COLUMN,
+    )
+    week_metrics = _build_cross_sectional_metrics(
+        data,
+        net_return_column=WEEK_HOLD_NET_RETURN_COLUMN,
+        benchmark_column=WEEK_HOLD_BENCHMARK_RETURN_COLUMN,
+        excess_column=WEEK_HOLD_EXCESS_RETURN_COLUMN,
+        sector_residual_column=WEEK_HOLD_SECTOR_RESIDUAL_RETURN_COLUMN,
+        zscore_column=WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN,
+        rank_column=WEEK_HOLD_CS_RANK_TARGET_COLUMN,
+    )
+    merged = intraday_metrics.merge(
+        week_metrics,
+        on=["date", "ticker"],
+        how="inner",
+    )
+    return pd.DataFrame(merged)
 
 
 def apply_target_metric_panel(
@@ -247,6 +314,11 @@ def apply_target_metric_panel(
         INTRADAY_SECTOR_RESIDUAL_RETURN_COLUMN,
         INTRADAY_CS_ZSCORE_TARGET_COLUMN,
         INTRADAY_CS_RANK_TARGET_COLUMN,
+        WEEK_HOLD_BENCHMARK_RETURN_COLUMN,
+        WEEK_HOLD_EXCESS_RETURN_COLUMN,
+        WEEK_HOLD_SECTOR_RESIDUAL_RETURN_COLUMN,
+        WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN,
+        WEEK_HOLD_CS_RANK_TARGET_COLUMN,
     ]
     merged = data.drop(
         columns=[column for column in metric_columns[2:] if column in data.columns],
@@ -281,7 +353,8 @@ def create_target_main(
     result: pd.DataFrame = pd.concat(target_parts, ignore_index=True)
     result = apply_target_metric_panel(result, build_target_metric_panel(result))
     LOGGER.info(
-        "Created broker-aware labels with execution_lag_days=%d and medium_hold_horizon_days=%d.",
+        "Created broker-aware labels: execution_lag_days=%d | week_hold_sessions=%d "
+        "(signal-day open -> close five sessions later).",
         execution_lag_days,
         horizon_days,
     )
