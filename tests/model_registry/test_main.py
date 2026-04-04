@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
+from core.src.meta_model.model_registry import main as model_registry_main
 from core.src.meta_model.model_registry.main import (
     ModelSpec,
     build_default_model_specs,
@@ -180,6 +181,64 @@ def test_ridge_and_factor_composite_handle_missing_values() -> None:
 
     assert np.isfinite(ridge_predictions).all()
     assert np.isfinite(factor_predictions).all()
+
+
+def test_xgboost_fit_and_predict_replace_infinite_features_with_nan(monkeypatch: pytest.MonkeyPatch) -> None:
+    train_frame = pd.DataFrame({
+        "date": pd.date_range("2022-01-03", periods=4, freq="B"),
+        "ticker": ["AAA", "BBB", "CCC", "DDD"],
+        "feature_a": [1.0, np.inf, 3.0, 4.0],
+        "feature_b": [0.5, 1.0, -np.inf, 2.0],
+        MODEL_TARGET_COLUMN: [1.0, 2.0, 3.0, 4.0],
+    })
+    test_frame = pd.DataFrame({
+        "date": pd.date_range("2022-01-10", periods=2, freq="B"),
+        "ticker": ["EEE", "FFF"],
+        "feature_a": [5.0, np.inf],
+        "feature_b": [2.5, 3.0],
+    })
+
+    class _FakeBooster:
+        @staticmethod
+        def predict(matrix: object) -> np.ndarray:
+            data = np.asarray(getattr(matrix, "data").to_numpy(dtype=np.float64), dtype=np.float64)
+            return np.nanmean(data, axis=1)
+
+    dmatrix_feature_snapshots: list[np.ndarray] = []
+
+    class _FakeXGBoostModule:
+        @staticmethod
+        def DMatrix(data: object, label: object | None = None, feature_names: list[str] | None = None) -> object:
+            del feature_names
+            frame = pd.DataFrame(data)
+            snapshot = frame.to_numpy(dtype=np.float64)
+            dmatrix_feature_snapshots.append(snapshot)
+            assert not np.isinf(snapshot).any()
+            return type("_FakeMatrix", (), {"data": frame, "label": label})()
+
+        @staticmethod
+        def train(
+            *,
+            params: dict[str, object],
+            dtrain: object,
+            num_boost_round: int,
+            verbose_eval: bool,
+        ) -> _FakeBooster:
+            del params, dtrain, num_boost_round, verbose_eval
+            return _FakeBooster()
+
+    monkeypatch.setattr(model_registry_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
+
+    artifact = fit_model(
+        ModelSpec(model_name="xgboost", params={"eta": 0.05}, training_rounds=5),
+        train_frame,
+        ["feature_a", "feature_b"],
+    )
+    predictions = predict_model(artifact, test_frame, ["feature_a", "feature_b"])
+
+    assert len(dmatrix_feature_snapshots) >= 2
+    assert all(not np.isinf(snapshot).any() for snapshot in dmatrix_feature_snapshots)
+    assert np.isfinite(predictions).all()
 
 
 if __name__ == "__main__":

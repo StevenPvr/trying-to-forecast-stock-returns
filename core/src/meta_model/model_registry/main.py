@@ -214,6 +214,14 @@ def _fit_factor_composite_model(
     )
 
 
+def _sanitize_xgboost_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    sanitized = pd.DataFrame(frame.copy())
+    finite_mask = np.isfinite(sanitized.to_numpy(dtype=np.float64, copy=False))
+    if not bool(finite_mask.all()):
+        sanitized = sanitized.where(finite_mask, np.nan)
+    return sanitized
+
+
 def _fit_xgboost_model(
     train_frame: pd.DataFrame,
     feature_columns: list[str],
@@ -223,8 +231,9 @@ def _fit_xgboost_model(
     training_rounds: int,
 ) -> ModelArtifact:
     xgb = load_xgboost_module()
+    feature_frame = _sanitize_xgboost_feature_frame(train_frame.loc[:, feature_columns])
     matrix = xgb.DMatrix(
-        train_frame.loc[:, feature_columns],
+        feature_frame,
         label=train_frame[target_column].to_numpy(dtype=np.float32),
         feature_names=feature_columns,
     )
@@ -384,7 +393,8 @@ def _predict_xgboost_model(
     feature_columns: list[str],
 ) -> np.ndarray:
     xgb = load_xgboost_module()
-    matrix = xgb.DMatrix(frame.loc[:, feature_columns], feature_names=feature_columns)
+    feature_frame = _sanitize_xgboost_feature_frame(frame.loc[:, feature_columns])
+    matrix = xgb.DMatrix(feature_frame, feature_names=feature_columns)
     return np.asarray(artifact.fitted_object.predict(matrix), dtype=np.float64)
 
 

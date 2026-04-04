@@ -73,7 +73,11 @@ def run_robust_feature_selection(
     )
     _log_survivor_preview("target correlation filter", target_survivors)
     LOGGER.info("Feature selection stage timing | stage=target_correlation_filter | elapsed=%.2fs", time.perf_counter() - stage_start)
-    final_selected_names = build_final_candidate_feature_names(sfi_scores, target_survivors)
+    final_selected_names = build_final_candidate_feature_names(
+        sfi_scores,
+        target_survivors,
+        max_selected_features=config.selected_feature_count,
+    )
     if len(final_selected_names) != len(target_survivors):
         LOGGER.info(
             "Feature selection broker feature rescue: target_survivors=%d | final_candidates=%d | rescued=%d | preview=%s",
@@ -141,6 +145,8 @@ def build_group_manifest(feature_names: list[str]) -> pd.DataFrame:
 def build_final_candidate_feature_names(
     sfi_scores: pd.DataFrame,
     target_survivors: list[str],
+    *,
+    max_selected_features: int | None = None,
 ) -> list[str]:
     """Ordered unique names: target-filter survivors plus rescued broker features."""
     target_survivor_set = set(target_survivors)
@@ -160,7 +166,12 @@ def build_final_candidate_feature_names(
         )["feature_name"]).tolist()
     ]
     ordered_names = [*target_survivors, *broker_bypass_names]
-    return list(dict.fromkeys(ordered_names))
+    deduplicated_names = list(dict.fromkeys(ordered_names))
+    if max_selected_features is None:
+        return deduplicated_names
+    if max_selected_features <= 0:
+        raise ValueError("max_selected_features must be strictly positive when provided.")
+    return deduplicated_names[:max_selected_features]
 
 
 def build_feature_score_report(

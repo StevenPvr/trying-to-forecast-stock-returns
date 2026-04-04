@@ -132,6 +132,7 @@ class TestFeatureSelection:
         config = SelectionConfig()
 
         assert config.parallel_workers == 9
+        assert config.selected_feature_count == 50
 
     def test_build_selection_feature_columns_excludes_targets_and_metadata(self) -> None:
         dataset = _make_preprocessed_dataset()

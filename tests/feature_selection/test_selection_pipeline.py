@@ -48,5 +48,26 @@ def test_build_final_candidate_feature_names_rescues_broker_features() -> None:
     ]
 
 
+def test_build_final_candidate_feature_names_applies_top_n_cap() -> None:
+    sfi_scores = pd.DataFrame(
+        {
+            "feature_name": ["f1", "f2", "f3"],
+            "feature_family": ["quant", "broker", "broker"],
+            "objective_score": [0.3, 0.2, 0.1],
+            "daily_rank_ic_mean": [0.3, 0.2, 0.1],
+            "coverage_fraction": [1.0, 1.0, 1.0],
+            "passes_coverage": [True, True, True],
+        },
+    )
+
+    candidate_names = build_final_candidate_feature_names(
+        sfi_scores,
+        target_survivors=["f1", "f2"],
+        max_selected_features=2,
+    )
+
+    assert candidate_names == ["f1", "f2"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

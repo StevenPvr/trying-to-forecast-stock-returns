@@ -30,6 +30,7 @@ DEFAULT_DISTANCE_CORRELATION_MAX_FEATURES: int = 384
 DEFAULT_TARGET_DISTANCE_CORRELATION_THRESHOLD: float = 0.005
 DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE: int = 512
 DEFAULT_TRAIN_SAMPLING_FRACTION: float = 0.20
+DEFAULT_SELECTED_FEATURE_COUNT: int = 50
 
 
 def _default_parallel_workers() -> int:
@@ -84,6 +85,7 @@ class FeatureSelectionConfig:
     target_distance_correlation_threshold: float = DEFAULT_TARGET_DISTANCE_CORRELATION_THRESHOLD
     target_distance_correlation_sample_size: int = DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE
     train_sampling_fraction: float = DEFAULT_TRAIN_SAMPLING_FRACTION
+    selected_feature_count: int = DEFAULT_SELECTED_FEATURE_COUNT
     emit_input_inventory: bool = DEFAULT_EMIT_INPUT_INVENTORY
 
     def resolved_state_evaluation_workers(self, *, fold_count: int) -> int:
