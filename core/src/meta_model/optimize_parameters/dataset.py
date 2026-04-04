@@ -90,11 +90,23 @@ def load_preprocessed_dataset(
 
 
 def build_feature_columns(data: pd.DataFrame) -> list[str]:
-    return [
-        column_name
-        for column_name in data.columns
-        if not is_excluded_feature_column(column_name)
-    ]
+    feature_columns: list[str] = []
+    skipped_non_numeric_columns: list[str] = []
+    for column_name in data.columns:
+        if is_excluded_feature_column(column_name):
+            continue
+        column_series = data[column_name]
+        if pd.api.types.is_numeric_dtype(column_series) or pd.api.types.is_bool_dtype(column_series):
+            feature_columns.append(column_name)
+            continue
+        skipped_non_numeric_columns.append(column_name)
+    if skipped_non_numeric_columns:
+        LOGGER.warning(
+            "Optimization dataset excludes non-numeric feature columns: count=%d | preview=%s",
+            len(skipped_non_numeric_columns),
+            ",".join(skipped_non_numeric_columns[:20]),
+        )
+    return feature_columns
 
 
 def validate_feature_schema_manifest(
@@ -126,6 +138,10 @@ def build_optimization_dataset_bundle(
     dataset_path: Path = FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
 ) -> OptimizationDatasetBundle:
     feature_columns = build_feature_columns(data)
+    if not feature_columns:
+        raise ValueError(
+            "Optimization dataset contains no numeric feature columns after exclusions.",
+        )
     validate_feature_schema_manifest(feature_columns, dataset_path)
     feature_frame = pd.DataFrame(data.loc[:, feature_columns].copy())
     feature_matrix = np.ascontiguousarray(

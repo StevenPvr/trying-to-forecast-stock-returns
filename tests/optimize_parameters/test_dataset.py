@@ -49,10 +49,25 @@ def test_build_feature_columns_preserves_dataset_order() -> None:
         "dataset_split": ["train"],
         TARGET_COLUMN: [0.1],
         "feature_b": [2.0],
+        "feature_text": ["foo"],
         "feature_a": [1.0],
     })
 
     assert build_feature_columns(data) == ["feature_b", "feature_a"]
+
+
+def test_build_feature_columns_excludes_non_numeric_types() -> None:
+    data = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+        "ticker": ["AAA", "AAA"],
+        "dataset_split": ["train", "val"],
+        TARGET_COLUMN: [0.1, 0.2],
+        "feature_float": [1.0, 2.0],
+        "feature_bool": [True, False],
+        "feature_name": ["Agilent Technologies", "Apple"],
+    })
+
+    assert build_feature_columns(data) == ["feature_float", "feature_bool"]
 
 
 def test_build_optimization_dataset_bundle_replaces_inf_with_nan(tmp_path: Path) -> None:
