@@ -171,12 +171,17 @@ def _evaluate_single_fold(
         train_matrix: Any
         train_window_label = train_window.label
         train_window_coverage = train_window.coverage_fraction
+        cached_train_window = None
         if cached_fold is not None:
             cached_train_window = next(
-                cached
-                for cached in cached_fold.train_windows
-                if cached.label == train_window.label
+                (
+                    cached
+                    for cached in cached_fold.train_windows
+                    if cached.label == train_window.label
+                ),
+                None,
             )
+        if cached_train_window is not None:
             train_matrix = cached_train_window.train_matrix
             train_window_label = cached_train_window.label
             train_window_coverage = cached_train_window.coverage_fraction

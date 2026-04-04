@@ -15,8 +15,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
 from core.src.meta_model.optimize_parameters import main as optimize_main
+from core.src.meta_model.optimize_parameters.fold_context import build_fold_evaluation_contexts
+from core.src.meta_model.optimize_parameters.fold_matrix_cache import CachedFoldMatrixBundle
 from core.src.meta_model.optimize_parameters.cv import WalkForwardFold, build_walk_forward_folds
-from core.src.meta_model.optimize_parameters.dataset import load_preprocessed_dataset
+from core.src.meta_model.optimize_parameters.dataset import (
+    build_optimization_dataset_bundle,
+    load_preprocessed_dataset,
+)
 from core.src.meta_model.optimize_parameters.config import (
     DEFAULT_BOOST_ROUNDS,
     EARLY_STOPPING_ROUNDS,
@@ -309,6 +314,50 @@ class TestFoldEvaluationBackend:
         )
 
         assert results == [{"fold_index": 1}]
+
+
+class TestSingleFoldEvaluationWithPartialCache:
+    def test_rebuilds_train_matrices_when_cache_contains_validation_only(
+        self,
+        monkeypatch,
+    ) -> None:
+        data = _make_larger_train_df()
+        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        config = OptimizationConfig(fold_count=5, target_horizon_days=1)
+        folds = build_walk_forward_folds(
+            bundle.metadata,
+            fold_count=config.fold_count,
+            target_horizon_days=config.target_horizon_days,
+        )
+        fold_context = build_fold_evaluation_contexts(bundle, folds, config)[0]
+        validation_matrix = _FakeDMatrix(
+            np.ascontiguousarray(bundle.feature_matrix[fold_context.fold.validation_indices]),
+            np.ascontiguousarray(bundle.target_array[fold_context.fold.validation_indices]),
+            feature_names=bundle.feature_columns,
+        )
+        cache_by_fold_index = {
+            fold_context.fold.index: CachedFoldMatrixBundle(
+                fold_context=fold_context,
+                validation_matrix=validation_matrix,
+                train_windows=[],
+            ),
+        }
+
+        monkeypatch.setattr(optimize_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
+
+        fold_result = optimize_main._evaluate_single_fold(
+            bundle,
+            fold_context,
+            {
+                "eta": 0.03,
+                "max_depth": 2,
+            },
+            config,
+            cache_by_fold_index,
+        )
+
+        assert fold_result["window_count"] == len(fold_context.train_windows)
+        assert float(fold_result["daily_rank_ic"]) == float(fold_result["daily_rank_ic"])
 
 
 class _RecordingTrial:

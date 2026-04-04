@@ -208,6 +208,55 @@ class TestFoldMatrixCache:
 
         assert cache is fake_cache
 
+    def test_falls_back_to_validation_only_cache_when_full_gpu_cache_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        data = _make_preprocessed_df()
+        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        config = OptimizationConfig(fold_count=5, target_horizon_days=1)
+        folds = build_walk_forward_folds(
+            bundle.metadata,
+            fold_count=config.fold_count,
+            target_horizon_days=config.target_horizon_days,
+        )
+        fold_contexts = build_fold_evaluation_contexts(bundle, folds, config)
+        sample_fold_context = fold_contexts[0]
+        fake_validation_only_cache = {
+            sample_fold_context.fold.index: CachedFoldMatrixBundle(
+                fold_context=sample_fold_context,
+                validation_matrix=_FakeDMatrix([], []),
+                train_windows=[],
+            ),
+        }
+
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.fold_matrix_cache._load_cupy_module",
+            lambda: object(),
+        )
+
+        def _raise_full_builder(*args: Any, **kwargs: Any) -> dict[int, CachedFoldMatrixBundle]:
+            del args, kwargs
+            raise RuntimeError("simulated oom")
+
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.fold_matrix_cache._build_fold_matrix_cache_gpu_resident",
+            _raise_full_builder,
+        )
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.fold_matrix_cache._build_validation_matrix_cache_gpu_resident",
+            lambda dataset_bundle, fold_contexts, *, xgb_module, cupy_module, gpu_device_id: fake_validation_only_cache,
+        )
+
+        cache = build_fold_matrix_cache(
+            bundle,
+            fold_contexts,
+            xgb_module=_FakeXGBoostModule(),
+            enabled=True,
+        )
+
+        assert cache is fake_validation_only_cache
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

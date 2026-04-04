@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from core.src.meta_model.optimize_parameters.dataset import OptimizationDatasetBundle
 from core.src.meta_model.optimize_parameters.fold_context import FoldEvaluationContext
 
@@ -118,6 +120,43 @@ def _build_fold_matrix_cache_gpu_resident(
         return cache_by_fold_index
 
 
+def _build_validation_matrix_cache_gpu_resident(
+    dataset_bundle: OptimizationDatasetBundle,
+    fold_contexts: list[FoldEvaluationContext],
+    *,
+    xgb_module: Any,
+    cupy_module: Any,
+    gpu_device_id: int,
+) -> dict[int, CachedFoldMatrixBundle]:
+    cache_by_fold_index: dict[int, CachedFoldMatrixBundle] = {}
+    with cupy_module.cuda.Device(gpu_device_id):
+        for fold_context in fold_contexts:
+            fold = fold_context.fold
+            validation_features_cpu = np.ascontiguousarray(
+                dataset_bundle.feature_matrix[fold.validation_indices],
+            )
+            validation_labels_cpu = np.ascontiguousarray(
+                dataset_bundle.target_array[fold.validation_indices],
+            )
+            validation_features = cupy_module.asarray(validation_features_cpu, dtype=cupy_module.float32)
+            validation_labels = cupy_module.asarray(validation_labels_cpu, dtype=cupy_module.float32)
+            validation_matrix = _build_dmatrix(
+                xgb_module,
+                validation_features,
+                validation_labels,
+                dataset_bundle.feature_columns,
+                prefer_quantile=False,
+            )
+            cache_by_fold_index[fold.index] = CachedFoldMatrixBundle(
+                fold_context=fold_context,
+                validation_matrix=validation_matrix,
+                train_windows=[],
+            )
+            del validation_features
+            del validation_labels
+    return cache_by_fold_index
+
+
 def build_fold_matrix_cache(
     dataset_bundle: OptimizationDatasetBundle,
     fold_contexts: list[FoldEvaluationContext],
@@ -146,10 +185,29 @@ def build_fold_matrix_cache(
         )
     except Exception as error:
         LOGGER.warning(
-            "CUDA fold matrix cache disabled (%s). Continuing without persistent fold cache to avoid host RAM amplification.",
+            "CUDA full fold matrix cache unavailable (%s). Retrying with validation-only GPU cache.",
             error,
         )
-        return None
+        try:
+            cache_by_fold_index = _build_validation_matrix_cache_gpu_resident(
+                dataset_bundle,
+                fold_contexts,
+                xgb_module=xgb_module,
+                cupy_module=cupy_module,
+                gpu_device_id=gpu_device_id,
+            )
+        except Exception as fallback_error:
+            LOGGER.warning(
+                "CUDA fold matrix cache disabled (%s). Continuing without persistent fold cache to avoid host RAM amplification.",
+                fallback_error,
+            )
+            return None
+        LOGGER.info(
+            "Built fold matrix cache for CUDA: backend=gpu-validation-only | folds=%d | cached_windows=0",
+            len(cache_by_fold_index),
+        )
+        gc.collect()
+        return cache_by_fold_index
 
     gc.collect()
     LOGGER.info(
