@@ -166,6 +166,15 @@ def _evaluate_single_fold(
             ),
         )
 
+    metric_mode = optimization_config.early_stopping_metric_mode.strip().lower()
+    if metric_mode not in {"native_rmse", "custom_rank_ic"}:
+        raise ValueError(
+            "Unsupported early_stopping_metric_mode. Expected one of: native_rmse, custom_rank_ic.",
+        )
+    use_native_rmse_early_stopping = metric_mode == "native_rmse"
+    early_stopping_metric_name = "rmse" if use_native_rmse_early_stopping else "daily_rank_ic"
+    maximize_metric = not use_native_rmse_early_stopping
+
     window_rows: list[dict[str, Any]] = []
     for train_window in active_fold_context.train_windows:
         train_matrix: Any
@@ -197,24 +206,39 @@ def _evaluate_single_fold(
             dtrain=train_matrix,
             num_boost_round=optimization_config.boost_rounds,
             evals=[(validation_matrix, "validation")],
-            custom_metric=_daily_rank_ic_metric,
-            maximize=True,
+            custom_metric=None if use_native_rmse_early_stopping else _daily_rank_ic_metric,
+            maximize=maximize_metric,
             evals_result=evaluation_history,
             callbacks=[
                 xgb.callback.EarlyStopping(
                     rounds=optimization_config.early_stopping_rounds,
-                    metric_name="daily_rank_ic",
+                    metric_name=early_stopping_metric_name,
                     data_name="validation",
-                    maximize=True,
+                    maximize=maximize_metric,
                     save_best=True,
                 ),
             ],
             verbose_eval=False,
         )
+        best_iteration = int(booster.best_iteration)
+        if use_native_rmse_early_stopping:
+            prediction_kwargs: dict[str, Any] = {}
+            if best_iteration >= 0:
+                prediction_kwargs["iteration_range"] = (0, best_iteration + 1)
+            try:
+                validation_predictions = booster.predict(validation_matrix, **prediction_kwargs)
+            except TypeError:
+                validation_predictions = booster.predict(validation_matrix)
+            window_daily_rank_ic = compute_mean_daily_rank_ic_from_context(
+                np.asarray(validation_predictions, dtype=np.float64),
+                active_fold_context.validation_rank_ic_context,
+            )
+        else:
+            window_daily_rank_ic = float(booster.best_score)
         window_rows.append({
             "label": train_window_label,
-            "daily_rank_ic": float(booster.best_score),
-            "best_iteration": int(booster.best_iteration),
+            "daily_rank_ic": float(window_daily_rank_ic),
+            "best_iteration": best_iteration,
             "coverage_fraction": train_window_coverage,
         })
         if cached_fold is None:
@@ -612,6 +636,10 @@ def _log_optimization_plan(
         acceleration_plan.gpu_name or "n/a",
         acceleration_plan.reason,
         acceleration_plan.use_gpu_matrix_cache,
+    )
+    LOGGER.info(
+        "Early stopping metric mode: %s",
+        config.early_stopping_metric_mode,
     )
     for fold in folds:
         LOGGER.info(

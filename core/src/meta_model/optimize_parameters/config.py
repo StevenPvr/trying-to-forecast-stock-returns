@@ -35,6 +35,7 @@ RANDOM_TRAIN_WINDOW_MIN_FRACTION: float = 0.60
 COMPUTE_ACCELERATOR: str = "auto"
 GPU_DEVICE_ID: int = 0
 ENABLE_GPU_MATRIX_CACHE: bool = True
+EARLY_STOPPING_METRIC_MODE: str = "native_rmse"
 
 
 @dataclass(frozen=True)
@@ -55,3 +56,4 @@ class OptimizationConfig:
     compute_accelerator: str = COMPUTE_ACCELERATOR
     gpu_device_id: int = GPU_DEVICE_ID
     enable_gpu_matrix_cache: bool = ENABLE_GPU_MATRIX_CACHE
+    early_stopping_metric_mode: str = EARLY_STOPPING_METRIC_MODE

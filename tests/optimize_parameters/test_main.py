@@ -359,6 +359,40 @@ class TestSingleFoldEvaluationWithPartialCache:
         assert fold_result["window_count"] == len(fold_context.train_windows)
         assert float(fold_result["daily_rank_ic"]) == float(fold_result["daily_rank_ic"])
 
+    def test_supports_native_rmse_early_stopping_mode(
+        self,
+        monkeypatch,
+    ) -> None:
+        data = _make_larger_train_df()
+        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        config = OptimizationConfig(
+            fold_count=5,
+            target_horizon_days=1,
+            early_stopping_metric_mode="native_rmse",
+        )
+        folds = build_walk_forward_folds(
+            bundle.metadata,
+            fold_count=config.fold_count,
+            target_horizon_days=config.target_horizon_days,
+        )
+        fold_context = build_fold_evaluation_contexts(bundle, folds, config)[0]
+
+        monkeypatch.setattr(optimize_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
+
+        fold_result = optimize_main._evaluate_single_fold(
+            bundle,
+            fold_context,
+            {
+                "eta": 0.03,
+                "max_depth": 2,
+            },
+            config,
+            None,
+        )
+
+        assert fold_result["window_count"] == len(fold_context.train_windows)
+        assert float(fold_result["daily_rank_ic"]) == float(fold_result["daily_rank_ic"])
+
 
 class _RecordingTrial:
     def __init__(self) -> None:
@@ -524,6 +558,15 @@ class TestOptimizationDatasetLoading:
 class _FakeBooster:
     best_score: float
     best_iteration: int
+    prediction_value: float
+
+    def predict(
+        self,
+        dmatrix: "_FakeDMatrix",
+        iteration_range: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+        del iteration_range
+        return np.full_like(np.asarray(dmatrix.label, dtype=float), self.prediction_value, dtype=float)
 
 
 class _FakeDMatrix:
@@ -559,7 +602,7 @@ class _FakeXGBoostModule:
         callbacks: list[Any],
         verbose_eval: bool,
     ) -> _FakeBooster:
-        del dtrain, callbacks, verbose_eval, maximize
+        del dtrain, callbacks, verbose_eval
         validation_matrix = evals[0][0]
         score = float(
             0.15
@@ -567,12 +610,23 @@ class _FakeXGBoostModule:
             - 0.01 * int(params["max_depth"])
             - 0.001 * float(validation_matrix.label.mean())
         )
-        metric_name, metric_value = custom_metric(
-            np.full_like(validation_matrix.label, fill_value=score, dtype=float),
-            validation_matrix,
+        if custom_metric is not None:
+            metric_name, metric_value = custom_metric(
+                np.full_like(validation_matrix.label, fill_value=score, dtype=float),
+                validation_matrix,
+            )
+            evals_result["validation"] = {metric_name: [metric_value]}
+            best_score = score
+        else:
+            del maximize
+            rmse_value = abs(score)
+            evals_result["validation"] = {"rmse": [rmse_value]}
+            best_score = rmse_value
+        return _FakeBooster(
+            best_score=best_score,
+            best_iteration=min(num_boost_round, 12 + int(params["max_depth"])),
+            prediction_value=score,
         )
-        evals_result["validation"] = {metric_name: [metric_value]}
-        return _FakeBooster(best_score=score, best_iteration=min(num_boost_round, 12 + int(params["max_depth"])))
 
 
 class _FakeTrial:
