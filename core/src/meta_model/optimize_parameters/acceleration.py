@@ -50,6 +50,7 @@ def _extract_cuda_build_flag(xgb_module: Any) -> bool | None:
 
 
 def _probe_cuda_training(xgb_module: Any, gpu_device_id: int) -> tuple[bool, str | None]:
+    cuda_device = "cuda" if gpu_device_id <= 0 else f"cuda:{gpu_device_id}"
     try:
         feature_matrix = np.asarray(
             [[0.0, 1.0], [1.0, 0.0], [0.5, 0.5], [0.2, 0.8]],
@@ -65,8 +66,7 @@ def _probe_cuda_training(xgb_module: Any, gpu_device_id: int) -> tuple[bool, str
             params={
                 "objective": "reg:squarederror",
                 "tree_method": "hist",
-                "device": "cuda",
-                "gpu_id": gpu_device_id,
+                "device": cuda_device,
                 "max_depth": 2,
                 "eta": 0.1,
                 "verbosity": 0,
@@ -78,7 +78,7 @@ def _probe_cuda_training(xgb_module: Any, gpu_device_id: int) -> tuple[bool, str
         )
         return True, None
     except Exception as error:
-        return False, str(error)
+        return False, str(error).splitlines()[0]
 
 
 def _detect_nvidia_gpu_name(device_id: int) -> str | None:

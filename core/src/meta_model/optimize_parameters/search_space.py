@@ -68,6 +68,5 @@ def suggest_xgboost_params(
     }
     if accelerator == "cuda":
         params["tree_method"] = "hist"
-        params["device"] = "cuda"
-        params["gpu_id"] = gpu_device_id
+        params["device"] = "cuda" if gpu_device_id <= 0 else f"cuda:{gpu_device_id}"
     return params

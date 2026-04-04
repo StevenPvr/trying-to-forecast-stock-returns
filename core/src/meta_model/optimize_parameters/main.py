@@ -730,6 +730,7 @@ def optimize_xgboost_parameters(
         fold_contexts,
         xgb_module=xgb_module,
         enabled=acceleration_plan.accelerator == "cuda" and acceleration_plan.use_gpu_matrix_cache,
+        gpu_device_id=acceleration_plan.gpu_device_id,
     )
     _log_optimization_plan(
         dataset_bundle,

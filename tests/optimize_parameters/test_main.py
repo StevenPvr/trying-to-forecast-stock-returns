@@ -367,8 +367,8 @@ class TestSearchSpace:
             gpu_device_id=2,
         )
 
-        assert params["device"] == "cuda"
-        assert params["gpu_id"] == 2
+        assert params["device"] == "cuda:2"
+        assert "gpu_id" not in params
 
 
 class TestBuildTrainWindows:
