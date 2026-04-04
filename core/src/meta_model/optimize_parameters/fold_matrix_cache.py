@@ -34,13 +34,16 @@ def _build_dmatrix(
     features: Any,
     labels: Any,
     feature_names: list[str],
+    *,
+    prefer_quantile: bool = True,
 ) -> Any:
-    quantile_dmatrix = getattr(xgb_module, "QuantileDMatrix", None)
-    if callable(quantile_dmatrix):
-        try:
-            return quantile_dmatrix(features, label=labels, feature_names=feature_names)
-        except Exception:
-            pass
+    if prefer_quantile:
+        quantile_dmatrix = getattr(xgb_module, "QuantileDMatrix", None)
+        if callable(quantile_dmatrix):
+            try:
+                return quantile_dmatrix(features, label=labels, feature_names=feature_names)
+            except Exception:
+                pass
     return xgb_module.DMatrix(features, label=labels, feature_names=feature_names)
 
 
@@ -74,6 +77,7 @@ def _build_fold_matrix_cache_host(
             validation_features,
             validation_labels,
             dataset_bundle.feature_columns,
+            prefer_quantile=False,
         )
         del validation_features
         del validation_labels
@@ -133,6 +137,7 @@ def _build_fold_matrix_cache_gpu_resident(
                 validation_features,
                 validation_labels,
                 dataset_bundle.feature_columns,
+                prefer_quantile=False,
             )
             del validation_indices
             del validation_features
