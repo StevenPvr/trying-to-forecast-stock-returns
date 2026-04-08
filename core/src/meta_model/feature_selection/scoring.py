@@ -32,10 +32,21 @@ from core.src.meta_model.research_metrics import (
 from core.src.meta_model.model_contract import DATE_COLUMN, MODEL_TARGET_COLUMN, PREDICTION_COLUMN
 from core.src.meta_model.model_registry.main import ModelSpec, fit_model, predict_model
 
+"""Proxy-backtest scorer: train XGBoost per fold, run backtest, aggregate economic metrics."""
+
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
+def _normalize_proxy_neutrality_mode(mode: str) -> str:
+    """Map legacy proxy values to the only backtest mode implemented (long-only book)."""
+    normalized: str = mode.strip().lower()
+    if normalized == "none":
+        return "long_only"
+    return normalized
+
+
 class BacktestFeatureSubsetScorer:
+    """Callable scorer: given feature names, returns a ``SubsetEconomicScore`` via proxy backtest."""
     def __init__(
         self,
         cache: FeatureSelectionRuntimeCache,
@@ -51,7 +62,7 @@ class BacktestFeatureSubsetScorer:
         self._config = config
         self._backtest_config = backtest_config or BacktestConfig(
             top_fraction=config.proxy_top_fraction,
-            neutrality_mode=config.proxy_neutrality_mode,
+            neutrality_mode=_normalize_proxy_neutrality_mode(config.proxy_neutrality_mode),
             open_hurdle_bps=config.proxy_open_hurdle_bps,
         )
         self._state_worker_budget = config.resolved_state_evaluation_workers(fold_count=len(folds))

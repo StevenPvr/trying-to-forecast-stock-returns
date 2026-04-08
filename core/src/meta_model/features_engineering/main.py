@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Entry point for the feature engineering pipeline."""
+
 import logging
 import sys
 from pathlib import Path

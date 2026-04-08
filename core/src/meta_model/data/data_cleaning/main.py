@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Data-cleaning orchestrator: load raw dataset, apply outlier pipeline, save cleaned output."""
+
 import logging
 import sys
 from pathlib import Path

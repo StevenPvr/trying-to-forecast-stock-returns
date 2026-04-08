@@ -28,16 +28,18 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass(frozen=True)
 class LaunchReadinessReport:
+    """Immutable snapshot of pipeline readiness: required paths, dependencies, secrets."""
+
     is_ready: bool
     missing_paths: list[str]
-    stock_cfd_count: int
-    index_cfd_count: int
+    stock_cash_count: int
     lightgbm_available: bool
     fred_api_key_available: bool
     required_paths: dict[str, str]
 
 
 def _build_required_paths() -> dict[str, str]:
+    """Return a label-to-path mapping of files required before pipeline launch."""
     return {
         "membership_history_csv": str(MEMBERSHIP_HISTORY_CSV),
         "fundamentals_history_csv": str(FUNDAMENTALS_HISTORY_CSV),
@@ -46,6 +48,7 @@ def _build_required_paths() -> dict[str, str]:
 
 
 def _list_missing_paths(required_paths: dict[str, str]) -> list[str]:
+    """Return paths from *required_paths* that do not exist on disk."""
     return [
         path
         for path in required_paths.values()
@@ -54,35 +57,31 @@ def _list_missing_paths(required_paths: dict[str, str]) -> list[str]:
 
 
 def build_launch_readiness_report() -> LaunchReadinessReport:
+    """Check paths, dependencies, and secrets and return a readiness report."""
     required_paths = _build_required_paths()
     missing_paths = _list_missing_paths(required_paths)
-    stock_cfd_count = 0
-    index_cfd_count = 0
+    stock_cash_count = 0
     if not missing_paths:
         provider = build_default_spec_provider(
             path=XTB_INSTRUMENT_SPECS_REFERENCE_JSON,
             allow_defaults_if_missing=False,
             require_explicit_symbols=True,
         )
-        stock_cfd_count = sum(
-            1 for spec in provider.specs if spec.instrument_group == "stock_cfd"
-        )
-        index_cfd_count = sum(
-            1 for spec in provider.specs if spec.instrument_group == "index_cfd"
+        stock_cash_count = sum(
+            1 for spec in provider.specs if spec.instrument_group == "stock_cash"
         )
     lightgbm_available = importlib.util.find_spec("lightgbm") is not None
     fred_api_key_available = bool(os.environ.get("FRED_API_KEY", "").strip())
     is_ready = (
         not missing_paths
-        and stock_cfd_count > 0
+        and stock_cash_count > 0
         and lightgbm_available
         and fred_api_key_available
     )
     return LaunchReadinessReport(
         is_ready=is_ready,
         missing_paths=missing_paths,
-        stock_cfd_count=stock_cfd_count,
-        index_cfd_count=index_cfd_count,
+        stock_cash_count=stock_cash_count,
         lightgbm_available=lightgbm_available,
         fred_api_key_available=fred_api_key_available,
         required_paths=required_paths,
@@ -90,10 +89,11 @@ def build_launch_readiness_report() -> LaunchReadinessReport:
 
 
 def main() -> None:
+    """Run the launch readiness check and exit non-zero on failure."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     report = build_launch_readiness_report()
     payload = dataclasses.asdict(report)
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    LOGGER.info("Launch readiness report:\n%s", json.dumps(payload, indent=2, sort_keys=True))
     if report.is_ready:
         LOGGER.info("Launch readiness check passed.")
         return

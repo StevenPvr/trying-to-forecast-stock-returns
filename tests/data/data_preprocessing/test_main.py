@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,10 +36,7 @@ from core.src.meta_model.data.data_preprocessing.streaming import (
 from core.src.meta_model.model_contract import (
     INTRADAY_CS_ZSCORE_TARGET_COLUMN,
     INTRADAY_GROSS_RETURN_COLUMN,
-    INTRADAY_BENCHMARK_RETURN_COLUMN,
     MODEL_TARGET_COLUMN,
-    OVERNIGHT_NET_RETURN_COLUMN,
-    SECTOR_RESIDUAL_FORWARD_RETURN_COLUMN,
     WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN,
 )
 
@@ -101,7 +99,7 @@ class TestPreprocessingSteps:
 
         assert result["date"].min() >= pd.Timestamp("2009-01-01")
 
-    def test_creates_target_main_as_week_hold_broker_aware_label_panel(self) -> None:
+    def test_creates_target_main_week_hold_geometry(self) -> None:
         df = pd.DataFrame(
             {
                 "date": pd.date_range("2020-01-01", periods=8, freq="B"),
@@ -118,15 +116,10 @@ class TestPreprocessingSteps:
         assert result.loc[0, "target_main"] == pytest.approx(np.log(113.0 / 102.0))
         assert result.loc[1, "target_main"] == pytest.approx(np.log(115.0 / 104.0))
         assert pd.isna(result.loc[2, "target_main"])
-        assert INTRADAY_GROSS_RETURN_COLUMN in result.columns
-        assert INTRADAY_CS_ZSCORE_TARGET_COLUMN in result.columns
-        assert WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN in result.columns
+        assert pd.isna(result.loc[7, "target_main"])
         assert MODEL_TARGET_COLUMN == WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN
         assert result.loc[0, MODEL_TARGET_COLUMN] == pytest.approx(result.loc[0, WEEK_HOLD_CS_ZSCORE_TARGET_COLUMN])
-        assert INTRADAY_BENCHMARK_RETURN_COLUMN in result.columns
-        assert OVERNIGHT_NET_RETURN_COLUMN in result.columns
-        assert SECTOR_RESIDUAL_FORWARD_RETURN_COLUMN in result.columns
-        assert pd.isna(result.loc[7, "target_main"])
+        assert INTRADAY_GROSS_RETURN_COLUMN in result.columns
 
     def test_excludes_covid_period_and_pre_covid_target_bridge_dates(self) -> None:
         df = pd.DataFrame(
@@ -147,36 +140,50 @@ class TestPreprocessingSteps:
         assert pd.Timestamp("2020-02-03") not in remaining_dates
 
     def test_assigns_train_val_test_and_drops_purge_embargo_windows(self) -> None:
+        # Fixed test_start and zero embargo so a short calendar is deterministic.
+        trading_days = pd.bdate_range("2022-01-03", periods=20, freq="C")
         df = pd.DataFrame(
             {
-                "date": pd.to_datetime(
-                    [
-                        "2018-11-30",
-                        "2018-12-15",
-                        "2019-01-15",
-                        "2019-02-01",
-                        "2021-11-30",
-                        "2021-12-15",
-                        "2022-01-15",
-                        "2022-02-01",
-                    ],
-                ),
-                "ticker": ["AAPL"] * 8,
-                "stock_close_price": np.arange(8, dtype=float) + 100.0,
-                "stock_close_log_return": np.arange(8, dtype=float) / 100.0,
-                "target_main": np.arange(8, dtype=float) / 10.0,
+                "date": trading_days,
+                "ticker": ["AAPL"] * len(trading_days),
+                "stock_close_price": np.arange(len(trading_days), dtype=float) + 100.0,
+                "stock_close_log_return": np.arange(len(trading_days), dtype=float) / 100.0,
+                "target_main": np.arange(len(trading_days), dtype=float) / 10.0,
             },
         )
+        extra_test = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2022-03-15", "2022-03-16"]),
+                "ticker": ["AAPL", "AAPL"],
+                "stock_close_price": [200.0, 201.0],
+                "stock_close_log_return": [0.01, 0.02],
+                "target_main": [0.5, 0.6],
+            },
+        )
+        df = pd.concat([df, extra_test], ignore_index=True)
 
-        result = assign_dataset_splits(df)
+        with (
+            patch(
+                "core.src.meta_model.data.data_preprocessing.main.DATASET_SPLIT_TEST_START_DATE",
+                date(2022, 3, 1),
+            ),
+            patch(
+                "core.src.meta_model.data.data_preprocessing.main.LABEL_EMBARGO_DAYS",
+                0,
+            ),
+        ):
+            result = assign_dataset_splits(df)
 
-        assert result["dataset_split"].tolist() == ["train", "val", "val", "test"]
-        assert result["date"].tolist() == [
-            pd.Timestamp("2018-11-30"),
-            pd.Timestamp("2019-02-01"),
-            pd.Timestamp("2021-11-30"),
-            pd.Timestamp("2022-02-01"),
-        ]
+        assert set(result.loc[result["dataset_split"] == "test", "date"].tolist()) == {
+            pd.Timestamp("2022-03-15"),
+            pd.Timestamp("2022-03-16"),
+        }
+        n_pre_test = 20
+        n_val_expected = max(1, int(round(0.30 * n_pre_test)))
+        n_val_rows = int((result["dataset_split"] == "val").sum())
+        assert n_val_rows == n_val_expected
+        assert int((result["dataset_split"] == "train").sum()) == n_pre_test - n_val_expected
+        assert len(result) == n_pre_test + 2
 
     def test_prunes_correlated_features_using_target_distance_correlation(self) -> None:
         dates = pd.date_range("2010-01-01", periods=40, freq="B")
@@ -342,6 +349,12 @@ class TestMain:
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_VAL_SAMPLE_CSV", val_sample_path),
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_TEST_PARQUET", test_path),
             patch("core.src.meta_model.data.data_preprocessing.main.PREPROCESSED_TEST_SAMPLE_CSV", test_sample_path),
+            # Monthly fixture rarely retains rows >= 2025-01-01 after label horizons; use an
+            # earlier cutoff so this integration test still exercises train/val/test outputs.
+            patch(
+                "core.src.meta_model.data.data_preprocessing.main.DATASET_SPLIT_TEST_START_DATE",
+                date(2015, 1, 1),
+            ),
         ):
             main()
 

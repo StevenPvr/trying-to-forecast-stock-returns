@@ -213,16 +213,16 @@ class TestResolveParallelism:
 
         assert plan.total_cores == 12
         assert plan.fold_workers == 5
-        assert plan.threads_per_fold == 2
+        assert plan.threads_per_fold == 3
 
     def test_allocates_threads_across_parallel_folds(self) -> None:
         plan = resolve_parallelism(total_cores=11, fold_count=5)
 
         assert plan.total_cores == 11
         assert plan.fold_workers == 5
-        assert plan.threads_per_fold == 2
+        assert plan.threads_per_fold == 3
 
-    def test_caps_fold_workers_when_feature_matrix_is_large(self) -> None:
+    def test_ignores_feature_matrix_size_for_parallelism(self) -> None:
         plan = resolve_parallelism(
             11,
             5,
@@ -230,8 +230,8 @@ class TestResolveParallelism:
         )
 
         assert plan.total_cores == 11
-        assert plan.fold_workers == 1
-        assert plan.threads_per_fold == 11
+        assert plan.fold_workers == 5
+        assert plan.threads_per_fold == 3
 
     def test_forces_single_fold_worker_in_cuda_mode(self) -> None:
         plan = resolve_parallelism(
@@ -331,9 +331,10 @@ class TestSingleFoldEvaluationWithPartialCache:
         )
         fold_context = build_fold_evaluation_contexts(bundle, folds, config)[0]
         validation_matrix = _FakeDMatrix(
-            np.ascontiguousarray(bundle.feature_matrix[fold_context.fold.validation_indices]),
-            np.ascontiguousarray(bundle.target_array[fold_context.fold.validation_indices]),
+            data=bundle.feature_frame.iloc[fold_context.fold.validation_indices].copy(),
+            label=np.ascontiguousarray(bundle.target_array[fold_context.fold.validation_indices]),
             feature_names=bundle.feature_columns,
+            enable_categorical=True,
         )
         cache_by_fold_index = {
             fold_context.fold.index: CachedFoldMatrixBundle(
@@ -570,10 +571,20 @@ class _FakeBooster:
 
 
 class _FakeDMatrix:
-    def __init__(self, data: Any, label: Any, feature_names: list[str] | None = None) -> None:
-        self.data = data
-        self.label = label
-        self.feature_names = feature_names or []
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        _ = kwargs.pop("enable_categorical", None)
+        if "data" in kwargs:
+            self.data = kwargs["data"]
+            self.label = kwargs.get("label")
+            self.feature_names = list(kwargs.get("feature_names") or [])
+        elif len(args) >= 1:
+            self.data = args[0]
+            self.label = args[1] if len(args) >= 2 else None
+            self.feature_names = list(args[2] if len(args) >= 3 else kwargs.get("feature_names") or [])
+        else:
+            self.data = None
+            self.label = None
+            self.feature_names = []
 
     def get_label(self) -> Any:
         return self.label

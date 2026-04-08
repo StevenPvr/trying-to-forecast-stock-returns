@@ -67,6 +67,19 @@ class TestFeatureSelectionIo:
         assert "feature_text" not in feature_columns
         assert MODEL_TARGET_COLUMN not in feature_columns
 
+    def test_discover_selection_feature_columns_excludes_temporarily_disabled_earnings_features(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        dataset_path = tmp_path / "preprocessed.parquet"
+        dataset = _make_preprocessed_dataset().assign(earnings_days_to_next=[5.0, 4.0, 3.0])
+        dataset.to_parquet(dataset_path, index=False)
+
+        feature_columns = discover_selection_feature_columns(dataset_path)
+
+        assert "feature_float" in feature_columns
+        assert "earnings_days_to_next" not in feature_columns
+
     def test_build_feature_selection_input_inventory_counts_columns(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
         _make_preprocessed_dataset().to_parquet(dataset_path, index=False)
@@ -74,17 +87,17 @@ class TestFeatureSelectionIo:
         inventory = build_feature_selection_input_inventory(dataset_path)
 
         assert inventory.total_columns == 7
-        assert inventory.excluded_columns == 4
+        assert inventory.excluded_columns == 3
         assert inventory.numeric_feature_columns == 2
-        assert inventory.non_numeric_non_excluded_columns == 1
+        assert inventory.non_numeric_non_excluded_columns == 2
 
     def test_build_feature_selection_input_inventory_from_frame_counts_columns(self) -> None:
         inventory = build_feature_selection_input_inventory_from_frame(_make_preprocessed_dataset())
 
         assert inventory.total_columns == 7
-        assert inventory.excluded_columns == 4
+        assert inventory.excluded_columns == 3
         assert inventory.numeric_feature_columns == 2
-        assert inventory.non_numeric_non_excluded_columns == 1
+        assert inventory.non_numeric_non_excluded_columns == 2
 
     def test_load_feature_selection_metadata_sorts_canonically(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
@@ -123,7 +136,7 @@ class TestFeatureSelectionIo:
         ]
         assert metadata.train_row_indices.tolist() == [0, 2]
 
-    def test_subsample_train_feature_selection_metadata_keeps_first_twenty_percent_of_train_dates(
+    def test_subsample_train_feature_selection_metadata_distributes_sampled_dates_across_train_history(
         self,
         tmp_path: Path,
     ) -> None:
@@ -146,7 +159,7 @@ class TestFeatureSelectionIo:
         assert sampled.train_row_indices.size == 4
         assert sampled_dates.tolist() == [
             pd.Timestamp("2024-01-02"),
-            pd.Timestamp("2024-01-03"),
+            pd.Timestamp("2024-01-15"),
         ]
 
     def test_subsample_train_feature_selection_metadata_respects_minimum_unique_dates(
@@ -170,8 +183,11 @@ class TestFeatureSelectionIo:
         )
         assert len(sampled_dates) == 6
         assert sampled.train_row_indices.size == 12
+        assert sampled_dates[0] == pd.Timestamp("2024-01-02")
+        assert sampled_dates[-1] == pd.Timestamp("2024-01-15")
+        assert sampled_dates.is_monotonic_increasing
 
-    def test_load_sampled_train_feature_selection_dataset_reads_only_earliest_sampled_train_dates(
+    def test_load_sampled_train_feature_selection_dataset_reads_only_temporally_distributed_sampled_train_dates(
         self,
         tmp_path: Path,
     ) -> None:
@@ -195,7 +211,7 @@ class TestFeatureSelectionIo:
         sampled_dates = pd.Index(pd.to_datetime(sampled_dataset["date"]).drop_duplicates().sort_values())
         assert sampled_dates.tolist() == [
             pd.Timestamp("2024-01-02"),
-            pd.Timestamp("2024-01-03"),
+            pd.Timestamp("2024-01-15"),
         ]
         assert set(sampled_dataset["dataset_split"]) == {"train"}
 

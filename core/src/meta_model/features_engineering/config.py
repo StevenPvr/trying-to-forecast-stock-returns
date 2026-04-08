@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Feature engineering constants: prefixes, windows, column lists, and trading-day calendar."""
+
 REQUIRED_TA_INPUT_COLUMNS: tuple[str, ...] = (
     "stock_open_price",
     "stock_high_price",

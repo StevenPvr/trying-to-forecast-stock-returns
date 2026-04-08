@@ -210,6 +210,68 @@ class TestFeatureSelectionObjective:
         assert candidate.lower_quartile_fold_net_pnl >= -0.0005
         assert passes_selection_gates(candidate, config)
 
+    def test_passes_selection_gates_rejects_candidate_below_lower_quartile_floor(self) -> None:
+        config = FeatureSelectionConfig(
+            positive_fold_share_min=0.50,
+            lower_quartile_fold_pnl_floor=-0.0005,
+            null_bootstrap_count=0,
+        )
+        candidate = aggregate_subset_score(
+            ["feature_a", "feature_b"],
+            [
+                _make_fold(
+                    1,
+                    weight=1.0,
+                    net_pnl_after_costs=-0.0040,
+                    alpha_over_benchmark_net=0.0001,
+                    turnover_annualized=0.45,
+                    max_drawdown=-0.04,
+                    daily_rank_ic_mean=0.0004,
+                    daily_rank_ic_ir=0.10,
+                    daily_top_bottom_spread_mean=0.0001,
+                ),
+                _make_fold(
+                    2,
+                    weight=2.0,
+                    net_pnl_after_costs=0.0002,
+                    alpha_over_benchmark_net=0.0004,
+                    turnover_annualized=0.47,
+                    max_drawdown=-0.03,
+                    daily_rank_ic_mean=0.0008,
+                    daily_rank_ic_ir=0.10,
+                    daily_top_bottom_spread_mean=0.0004,
+                ),
+                _make_fold(
+                    3,
+                    weight=3.0,
+                    net_pnl_after_costs=0.0010,
+                    alpha_over_benchmark_net=0.0005,
+                    turnover_annualized=0.46,
+                    max_drawdown=-0.03,
+                    daily_rank_ic_mean=0.0010,
+                    daily_rank_ic_ir=0.10,
+                    daily_top_bottom_spread_mean=0.0005,
+                ),
+                _make_fold(
+                    4,
+                    weight=4.0,
+                    net_pnl_after_costs=0.0012,
+                    alpha_over_benchmark_net=0.0006,
+                    turnover_annualized=0.46,
+                    max_drawdown=-0.02,
+                    daily_rank_ic_mean=0.0012,
+                    daily_rank_ic_ir=0.10,
+                    daily_top_bottom_spread_mean=0.0006,
+                ),
+            ],
+        )
+
+        assert candidate.objective_score > 0.0
+        assert candidate.weighted_daily_rank_ic_ir > 0.0
+        assert candidate.weighted_daily_top_bottom_spread_mean > 0.0
+        assert candidate.lower_quartile_fold_net_pnl < -0.0005
+        assert not passes_selection_gates(candidate, config)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

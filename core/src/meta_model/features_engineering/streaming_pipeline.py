@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Streaming feature pipeline: memory-efficient chunked processing for large universes."""
+
 import gc
 import logging
 from pathlib import Path

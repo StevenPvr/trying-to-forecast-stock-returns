@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""High-level composite features: sector-relative, signal interactions, and alpha composites."""
+
 import logging
 from pathlib import Path
 from typing import cast
@@ -7,7 +9,6 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
-from core.src.meta_model.broker_xtb.costs import estimate_trade_cost
 from core.src.meta_model.broker_xtb.specs import (
     BrokerSpecProvider,
     XtbInstrumentSpec,
@@ -38,6 +39,7 @@ EARNINGS_REQUIRED_COLUMNS: tuple[str, ...] = (
 )
 TEMP_PREFIX: str = "__hl_"
 FAR_EARNINGS_DISTANCE: float = 252.0
+_SUPPORTED_EARNINGS_SESSIONS: frozenset[str] = frozenset({"before_open", "after_close", "unknown"})
 RSI_OVERBOUGHT_THRESHOLD: float = 70.0
 RSI_OVERSOLD_THRESHOLD: float = 30.0
 VOLATILITY_TENSION_THRESHOLD: float = 1.0
@@ -148,8 +150,10 @@ def _add_xtb_features(data: pd.DataFrame, spec_provider: BrokerSpecProvider) -> 
     prepared["xtb_long_swap_bps_daily"] = long_swap
     prepared["xtb_short_swap_bps_daily"] = short_swap
     prepared["xtb_swap_asymmetry"] = short_swap - long_swap
-    prepared["xtb_expected_intraday_cost_rate"] = _estimate_expected_cost_rates(resolved_specs, holding_days=0)
-    prepared["xtb_expected_overnight_cost_rate"] = _estimate_expected_cost_rates(resolved_specs, holding_days=1)
+    n_specs: int = len(resolved_specs)
+    zero_rates = np.zeros(n_specs, dtype=np.float64)
+    prepared["xtb_expected_intraday_cost_rate"] = zero_rates
+    prepared["xtb_expected_overnight_cost_rate"] = zero_rates.copy()
     spread_rate = spread_bps / 10_000.0
     prepared["xtb_spread_to_realized_vol_21d"] = _safe_divide(
         spread_rate,
@@ -160,15 +164,6 @@ def _add_xtb_features(data: pd.DataFrame, spec_provider: BrokerSpecProvider) -> 
         prepared[f"{TEMP_PREFIX}gap_return"].abs(),
     )
     return prepared
-
-
-def _estimate_expected_cost_rates(specs: list[XtbInstrumentSpec], *, holding_days: int) -> np.ndarray:
-    total_costs: list[float] = []
-    for raw_spec in specs:
-        long_cost = estimate_trade_cost(raw_spec, side="long", expected_holding_days=holding_days)
-        short_cost = estimate_trade_cost(raw_spec, side="short", expected_holding_days=holding_days)
-        total_costs.append((long_cost.total_cost_rate + short_cost.total_cost_rate) / 2.0)
-    return np.array(total_costs, dtype=np.float64)
 
 
 def _add_sector_features(data: pd.DataFrame) -> pd.DataFrame:
@@ -330,12 +325,19 @@ def _load_earnings_reference(earnings_path: Path, trading_dates: pd.Series) -> p
     prepared["announcement_date"] = pd.to_datetime(prepared["announcement_date"])
     prepared["announcement_session"] = prepared["announcement_session"].astype(str).str.lower()
     invalid_sessions = prepared.loc[
-        ~prepared["announcement_session"].isin({"before_open", "after_close"}),
+        ~prepared["announcement_session"].isin(_SUPPORTED_EARNINGS_SESSIONS),
         "announcement_session",
     ]
     if not invalid_sessions.empty:
         invalid_preview = ", ".join(sorted({str(value) for value in invalid_sessions.tolist()}))
         raise ValueError(f"Unsupported earnings announcement_session values: {invalid_preview}")
+    unknown_session_mask = prepared["announcement_session"].eq("unknown")
+    if bool(unknown_session_mask.any()):
+        LOGGER.warning(
+            "Ignoring %d earnings events with unknown session timing; earnings alpha features remain disabled until session timing is explicit.",
+            int(unknown_session_mask.sum()),
+        )
+        prepared = pd.DataFrame(prepared.loc[~unknown_session_mask].copy())
     effective_sessions = _resolve_effective_earnings_sessions(prepared, trading_dates)
     return effective_sessions.sort_values(["ticker", f"{TEMP_PREFIX}effective_session_index"]).reset_index(drop=True)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Preprocessing orchestrator: target construction, feature normalisation, split assignment."""
+
 import logging
 import importlib
 import importlib.util
@@ -42,9 +44,12 @@ else:  # pragma: no cover - exercised when numba is unavailable locally
     njit = _njit_fallback
     prange = _prange_fallback
 
-from core.src.meta_model.data.constants import RANDOM_SEED, SAMPLE_FRAC
-from core.src.meta_model.broker_xtb.costs import estimate_trade_cost
-from core.src.meta_model.broker_xtb.specs import build_default_spec_provider
+from core.src.meta_model.data.constants import (
+    DATASET_SPLIT_TEST_START_DATE,
+    DATASET_SPLIT_VAL_FRACTION_OF_PRE_TEST_UNIQUE_DATES,
+    RANDOM_SEED,
+    SAMPLE_FRAC,
+)
 from core.src.meta_model.data.paths import (
     DATA_PREPROCESSING_DIR,
     FEATURES_OUTPUT_PARQUET,
@@ -72,6 +77,7 @@ from core.src.meta_model.data.registry import (
 from core.src.meta_model.model_contract import (
     EXECUTION_LAG_DAYS,
     HOLD_PERIOD_DAYS,
+    LABEL_EMBARGO_DAYS,
     INTRADAY_BENCHMARK_RETURN_COLUMN,
     INTRADAY_CS_RANK_TARGET_COLUMN,
     INTRADAY_CS_ZSCORE_TARGET_COLUMN,
@@ -110,10 +116,6 @@ FEATURE_SAMPLE_FRAC: float = 0.5
 FEATURE_SAMPLE_MAX_ROWS: int = 2000
 PEARSON_PRESCREENER_THRESHOLD: float = 0.9
 DISTANCE_CORRELATION_THRESHOLD: float = 0.95
-TRAIN_END_DATE: date = date(2018, 11, 30)
-VAL_START_DATE: date = date(2019, 2, 1)
-VAL_END_DATE: date = date(2021, 11, 30)
-TEST_START_DATE: date = date(2022, 2, 1)
 TARGET_RELATED_COLUMNS: tuple[str, ...] = (
     TARGET_COLUMN,
     REALIZED_RETURN_COLUMN,
@@ -163,15 +165,16 @@ def filter_from_start_date(
 def create_target_main_group(
     group: pd.DataFrame,
     *,
-    spec_provider: Any | None = None,
     horizon_days: int = TARGET_HORIZON_DAYS,
     execution_lag_days: int = TARGET_EXECUTION_LAG_DAYS,
 ) -> pd.DataFrame:
-    """Attach forward returns; row ``date`` is execution day J (see ``model_contract``).
+    """Attach forward returns with decision at close(J).
 
-    Week label uses open(J + ``execution_lag_days``). With the default
-    ``execution_lag_days == 1``, row ``date`` is the signal day and entry is next
-    session open. Features must be aligned to what is known at decision time.
+    The primary week label follows the project contract: open(J+1) -> close(J+6)
+    when ``execution_lag_days == 1`` and ``horizon_days == 5``.
+
+    Net-of-cost columns match gross returns: cash-equity convention with no
+    broker round-trip model (legacy CFD fee plumbing removed).
     """
     ticker_group: pd.DataFrame = group.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
     if ticker_group.empty:
@@ -183,8 +186,6 @@ def create_target_main_group(
         missing_list = ", ".join(sorted(missing_columns))
         raise ValueError(f"Missing required column(s) for target creation: {missing_list}")
 
-    resolved_spec_provider = spec_provider if spec_provider is not None else build_default_spec_provider()
-    ticker_symbol: str = str(ticker_group["ticker"].iloc[0])
     entry_open = pd.Series(ticker_group["stock_open_price"].shift(-execution_lag_days))
     entry_close = pd.Series(ticker_group["stock_close_price"].shift(-execution_lag_days))
     next_open = pd.Series(ticker_group["stock_open_price"].shift(-(execution_lag_days + 1)))
@@ -201,22 +202,12 @@ def create_target_main_group(
     medium_hold_gross_return = np.log(medium_exit_open / entry_open)
     week_hold_gross_return = np.log(week_exit_close / entry_open)
 
-    def _cost_rate(
-        trade_date: pd.Timestamp,
-        holding_days: int,
-        ticker_name: str = ticker_symbol,
-    ) -> float:
-        spec = resolved_spec_provider.resolve(ticker_name, pd.Timestamp(trade_date))
-        long_cost = estimate_trade_cost(spec, side="long", expected_holding_days=holding_days)
-        short_cost = estimate_trade_cost(spec, side="short", expected_holding_days=holding_days)
-        return (long_cost.total_cost_rate + short_cost.total_cost_rate) / 2.0
-
-    trade_dates = pd.to_datetime(ticker_group["date"])
-    intraday_cost = _map_trade_costs(trade_dates, _cost_rate, 0)
-    overnight_cost = _map_trade_costs(trade_dates, _cost_rate, 1)
-    short_hold_cost = _map_trade_costs(trade_dates, _cost_rate, 1)
-    medium_hold_cost = _map_trade_costs(trade_dates, _cost_rate, horizon_days)
-    week_hold_cost = _map_trade_costs(trade_dates, _cost_rate, horizon_days)
+    zero_cost = pd.Series(0.0, index=ticker_group.index, dtype=np.float64)
+    intraday_cost = zero_cost
+    overnight_cost = zero_cost
+    short_hold_cost = zero_cost
+    medium_hold_cost = zero_cost
+    week_hold_cost = zero_cost
 
     ticker_group[INTRADAY_GROSS_RETURN_COLUMN] = intraday_gross_return
     ticker_group[TARGET_COLUMN] = week_hold_gross_return
@@ -338,13 +329,11 @@ def create_target_main(
     execution_lag_days: int = TARGET_EXECUTION_LAG_DAYS,
 ) -> pd.DataFrame:
     enriched: pd.DataFrame = data.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
-    spec_provider = build_default_spec_provider()
     target_parts: list[pd.DataFrame] = []
     for _, group in enriched.groupby("ticker", sort=False):
         target_parts.append(
             create_target_main_group(
                 group,
-                spec_provider=spec_provider,
                 horizon_days=horizon_days,
                 execution_lag_days=execution_lag_days,
             ),
@@ -353,25 +342,13 @@ def create_target_main(
     result: pd.DataFrame = pd.concat(target_parts, ignore_index=True)
     result = apply_target_metric_panel(result, build_target_metric_panel(result))
     LOGGER.info(
-        "Created broker-aware labels: execution_lag_days=%d | week_hold_sessions=%d "
-        "(signal-day open -> close five sessions later).",
+        "Created forward-hold labels (zero frictions in net columns): "
+        "execution_lag_days=%d | week_hold_sessions=%d "
+        "(signal-day close decision, next-open entry -> close five sessions later).",
         execution_lag_days,
         horizon_days,
     )
     return result.sort_values(["date", "ticker"]).reset_index(drop=True)
-
-
-def _map_trade_costs(
-    trade_dates: pd.Series,
-    cost_rate_fn: Callable[[pd.Timestamp, int], float],
-    holding_days: int,
-) -> pd.Series:
-    return trade_dates.map(
-        lambda value, _cost_rate=cost_rate_fn, _holding_days=holding_days: _cost_rate(
-            pd.Timestamp(value),
-            _holding_days,
-        ),
-    )
 
 
 def exclude_covid_period(
@@ -407,27 +384,78 @@ def exclude_covid_period(
 
 
 def assign_dataset_splits(data: pd.DataFrame) -> pd.DataFrame:
+    """Assign train/val/test using a fixed test start date and proportional train/val.
+
+    Rows with ``date >= DATASET_SPLIT_TEST_START_DATE`` are test. The last
+    ``LABEL_EMBARGO_DAYS`` business days strictly before that start are dropped
+    (purge). Among remaining unique trading days before that purge window,
+    approximately ``DATASET_SPLIT_VAL_FRACTION_OF_PRE_TEST_UNIQUE_DATES`` are
+    validation (latest dates) and the rest are train, with an additional
+    ``LABEL_EMBARGO_DAYS`` business-day purge between the last train day and
+    the first validation day when there is enough history.
+
+    Train thus receives ~70% of that pre-test timeline when val is 30% and test
+    is date-based (the slack beyond 60/30 goes to train).
+    """
     split_ready: pd.DataFrame = data.copy()
     dates: pd.Series = pd.to_datetime(split_ready["date"])
-    train_end_timestamp = pd.Timestamp(TRAIN_END_DATE)
-    val_start_timestamp = pd.Timestamp(VAL_START_DATE)
-    val_end_timestamp = pd.Timestamp(VAL_END_DATE)
-    test_start_timestamp = pd.Timestamp(TEST_START_DATE)
+    test_start_ts: pd.Timestamp = pd.Timestamp(DATASET_SPLIT_TEST_START_DATE)
+    embargo: int = LABEL_EMBARGO_DAYS
+    test_embargo_cutoff: pd.Timestamp = test_start_ts - pd.offsets.BusinessDay(embargo)
+
     split_ready[SPLIT_COLUMN] = pd.Series(pd.NA, index=split_ready.index, dtype="object")
 
-    split_ready.loc[dates <= train_end_timestamp, SPLIT_COLUMN] = "train"
-    split_ready.loc[
-        (dates >= val_start_timestamp) & (dates <= val_end_timestamp),
-        SPLIT_COLUMN,
-    ] = "val"
-    split_ready.loc[dates >= test_start_timestamp, SPLIT_COLUMN] = "test"
+    split_ready.loc[dates >= test_start_ts, SPLIT_COLUMN] = "test"
+    purge_before_test_mask: pd.Series = (dates >= test_embargo_cutoff) & (dates < test_start_ts)
+    split_ready.loc[purge_before_test_mask, SPLIT_COLUMN] = pd.NA
+
+    eligible_mask: pd.Series = dates < test_embargo_cutoff
+    eligible_dates: pd.Index = pd.Index(
+        pd.to_datetime(dates.loc[eligible_mask]).drop_duplicates().sort_values(),
+    )
+    n: int = int(len(eligible_dates))
+    train_dates_list: list[pd.Timestamp]
+    purge_mid_list: list[pd.Timestamp]
+    val_dates_list: list[pd.Timestamp]
+
+    if n == 0:
+        train_dates_list = []
+        purge_mid_list = []
+        val_dates_list = []
+    else:
+        n_val: int = max(
+            1,
+            int(round(DATASET_SPLIT_VAL_FRACTION_OF_PRE_TEST_UNIQUE_DATES * n)),
+        )
+        split_at: int = n - n_val
+        if split_at <= embargo:
+            LOGGER.warning(
+                "Only %d unique pre-test dates; cannot reserve %d-day train/val embargo — "
+                "using contiguous train/val split.",
+                n,
+                embargo,
+            )
+            train_dates_list = eligible_dates[:split_at].tolist()
+            purge_mid_list = []
+            val_dates_list = eligible_dates[split_at:].tolist()
+        else:
+            train_last_idx: int = split_at - embargo - 1
+            train_dates_list = eligible_dates[: train_last_idx + 1].tolist()
+            purge_mid_list = eligible_dates[train_last_idx + 1 : split_at].tolist()
+            val_dates_list = eligible_dates[split_at:].tolist()
+
+    split_ready.loc[dates.isin(train_dates_list), SPLIT_COLUMN] = "train"
+    split_ready.loc[dates.isin(val_dates_list), SPLIT_COLUMN] = "val"
+    split_ready.loc[dates.isin(purge_mid_list), SPLIT_COLUMN] = pd.NA
 
     split_ready = pd.DataFrame(split_ready.loc[split_ready[SPLIT_COLUMN].notna()].copy())
     LOGGER.info(
-        "Assigned dataset splits: train=%d, val=%d, test=%d",
+        "Assigned dataset splits: train=%d, val=%d, test=%d (test_start=%s, pre_test_unique=%d)",
         int((split_ready[SPLIT_COLUMN] == "train").sum()),
         int((split_ready[SPLIT_COLUMN] == "val").sum()),
         int((split_ready[SPLIT_COLUMN] == "test").sum()),
+        test_start_ts.date(),
+        n,
     )
     return split_ready.sort_values(["date", "ticker"]).reset_index(drop=True)
 

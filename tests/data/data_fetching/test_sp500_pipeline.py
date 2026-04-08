@@ -424,7 +424,7 @@ class TestBuildDataset:
             json.dumps([
                 {
                     "symbol": "AAPL",
-                    "instrument_group": "stock_cfd",
+                    "instrument_group": "stock_cash",
                     "currency": "USD",
                     "spread_bps": 25.0,
                     "slippage_bps": 5.0,

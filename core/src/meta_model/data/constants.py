@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from datetime import date
+
+# --- Dataset splits (preprocessing, train/val/test by signal date) ---
+
+# Test holdout: all rows with date >= this day are "test".
+DATASET_SPLIT_TEST_START_DATE: date = date(2025, 1, 1)
+# Share of unique pre-test (embargo-adjusted) trading days for validation; the remainder
+# is train. Nominal 60% train + 30% val leaves 10% unaccounted when test is date-based,
+# so train absorbs that slack (~70% / ~30% of the pre-test timeline).
+DATASET_SPLIT_VAL_FRACTION_OF_PRE_TEST_UNIQUE_DATES: float = 0.30
+
 # --- S&P 500 Data Fetching ---
 
 WIKIPEDIA_SP500_URL: str = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"

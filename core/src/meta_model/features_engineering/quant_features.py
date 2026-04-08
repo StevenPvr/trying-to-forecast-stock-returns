@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Quantitative features: volatility estimators, momentum, liquidity, trend, and drawdown."""
+
 import numpy as np
 import pandas as pd
 
@@ -67,29 +69,29 @@ def _compute_range_based_volatility_features(
         k: float = 0.34 / (1.34 + ((window + 1.0) / max(window - 1.0, 1.0)))
         parkinson = _as_series(
             np.sqrt(
-                parkinson_daily_var.rolling(window).mean().clip(0.0)
+                parkinson_daily_var.rolling(window, min_periods=window).mean().clip(0.0)
                 * TRADING_DAYS_PER_YEAR,
             ),
             index,
         )
         garman_klass = _as_series(
             np.sqrt(
-                garman_klass_daily_var.rolling(window).mean().clip(0.0)
+                garman_klass_daily_var.rolling(window, min_periods=window).mean().clip(0.0)
                 * TRADING_DAYS_PER_YEAR,
             ),
             index,
         )
         rogers_satchell = _as_series(
             np.sqrt(
-                rogers_satchell_daily_var.rolling(window).mean().clip(0.0)
+                rogers_satchell_daily_var.rolling(window, min_periods=window).mean().clip(0.0)
                 * TRADING_DAYS_PER_YEAR,
             ),
             index,
         )
         yang_zhang_var = _as_series(
-            yz_open_var_proxy.rolling(window).var()
-            + (k * yz_close_var_proxy.rolling(window).var())
-            + ((1.0 - k) * rogers_satchell_daily_var.rolling(window).mean()),
+            yz_open_var_proxy.rolling(window, min_periods=window).var()
+            + (k * yz_close_var_proxy.rolling(window, min_periods=window).var())
+            + ((1.0 - k) * rogers_satchell_daily_var.rolling(window, min_periods=window).mean()),
             index,
         )
         yang_zhang = _as_series(
@@ -173,22 +175,22 @@ def add_quant_features_for_ticker(group: pd.DataFrame) -> pd.DataFrame:
 
     for window in VOLATILITY_WINDOWS:
         realized_vol = _as_series(
-            returns_1d.rolling(window).std() * np.sqrt(TRADING_DAYS_PER_YEAR),
+            returns_1d.rolling(window, min_periods=window).std() * np.sqrt(TRADING_DAYS_PER_YEAR),
             index,
         )
         group[f"{QUANT_FEATURE_PREFIX}realized_vol_{window}d"] = realized_vol
-        group[f"{QUANT_FEATURE_PREFIX}return_skew_{window}d"] = returns_1d.rolling(window).skew()
-        group[f"{QUANT_FEATURE_PREFIX}return_kurt_{window}d"] = returns_1d.rolling(window).kurt()
-        group[f"{QUANT_FEATURE_PREFIX}return_autocorr_lag1_{window}d"] = returns_1d.rolling(window).corr(
+        group[f"{QUANT_FEATURE_PREFIX}return_skew_{window}d"] = returns_1d.rolling(window, min_periods=window).skew()
+        group[f"{QUANT_FEATURE_PREFIX}return_kurt_{window}d"] = returns_1d.rolling(window, min_periods=window).kurt()
+        group[f"{QUANT_FEATURE_PREFIX}return_autocorr_lag1_{window}d"] = returns_1d.rolling(window, min_periods=window).corr(
             returns_1d.shift(1),
         )
 
     for window in TREND_WINDOWS:
-        trend_slope = _log_series(close_price).rolling(window).apply(
+        trend_slope = _log_series(close_price).rolling(window, min_periods=window).apply(
             annualized_trend_slope,
             raw=True,
         )
-        trend_r2_value = _log_series(close_price).rolling(window).apply(
+        trend_r2_value = _log_series(close_price).rolling(window, min_periods=window).apply(
             trend_r2,
             raw=True,
         )
@@ -200,12 +202,12 @@ def add_quant_features_for_ticker(group: pd.DataFrame) -> pd.DataFrame:
             window,
         )
         group[f"{QUANT_FEATURE_PREFIX}positive_day_ratio_{window}d"] = (
-            returns_1d.gt(0).rolling(window).mean()
+            returns_1d.gt(0).rolling(window, min_periods=window).mean()
         )
 
     for window in (21, 63):
-        negative_return_square_mean = returns_1d.clip(upper=0.0).pow(2).rolling(window).mean()
-        positive_return_square_mean = returns_1d.clip(lower=0.0).pow(2).rolling(window).mean()
+        negative_return_square_mean = returns_1d.clip(upper=0.0).pow(2).rolling(window, min_periods=window).mean()
+        positive_return_square_mean = returns_1d.clip(lower=0.0).pow(2).rolling(window, min_periods=window).mean()
         group[f"{QUANT_FEATURE_PREFIX}downside_vol_{window}d"] = np.sqrt(
             negative_return_square_mean * TRADING_DAYS_PER_YEAR,
         )
@@ -214,8 +216,8 @@ def add_quant_features_for_ticker(group: pd.DataFrame) -> pd.DataFrame:
         )
 
     for window in DRAWDOWN_WINDOWS:
-        rolling_max = _as_series(close_price.rolling(window).max(), index)
-        rolling_min = _as_series(close_price.rolling(window).min(), index)
+        rolling_max = _as_series(close_price.rolling(window, min_periods=window).max(), index)
+        rolling_min = _as_series(close_price.rolling(window, min_periods=window).min(), index)
         group[f"{QUANT_FEATURE_PREFIX}drawdown_{window}d"] = safe_divide(close_price, rolling_max) - 1.0
         group[f"{QUANT_FEATURE_PREFIX}rebound_from_low_{window}d"] = safe_divide(close_price, rolling_min) - 1.0
 
@@ -234,15 +236,15 @@ def add_quant_features_for_ticker(group: pd.DataFrame) -> pd.DataFrame:
     )
 
     for window in LIQUIDITY_WINDOWS:
-        avg_volume = _as_series(volume.rolling(window).mean(), index)
-        avg_dollar_volume = _as_series(dollar_volume.rolling(window).mean(), index)
+        avg_volume = _as_series(volume.rolling(window, min_periods=window).mean(), index)
+        avg_dollar_volume = _as_series(dollar_volume.rolling(window, min_periods=window).mean(), index)
         volume_ratio = _as_series(safe_divide(volume, avg_volume) - 1.0, index)
         dollar_volume_ratio = _as_series(
             safe_divide(dollar_volume, avg_dollar_volume) - 1.0,
             index,
         )
         signed_dollar_volume_mean = _as_series(
-            signed_dollar_volume.rolling(window).mean(),
+            signed_dollar_volume.rolling(window, min_periods=window).mean(),
             index,
         )
         signed_dollar_volume_ratio = _as_series(
@@ -261,7 +263,7 @@ def add_quant_features_for_ticker(group: pd.DataFrame) -> pd.DataFrame:
             window,
         )
         group[f"{QUANT_FEATURE_PREFIX}volume_cv_{window}d"] = safe_divide(
-            _as_series(volume.rolling(window).std(), index),
+            _as_series(volume.rolling(window, min_periods=window).std(), index),
             avg_volume,
         )
         amihud_daily = _as_series(
@@ -269,7 +271,7 @@ def add_quant_features_for_ticker(group: pd.DataFrame) -> pd.DataFrame:
             index,
         )
         group[f"{QUANT_FEATURE_PREFIX}amihud_illiquidity_{window}d"] = (
-            amihud_daily.rolling(window).mean()
+            amihud_daily.rolling(window, min_periods=window).mean()
         )
         group[f"{QUANT_FEATURE_PREFIX}signed_dollar_volume_ratio_{window}d"] = (
             signed_dollar_volume_ratio

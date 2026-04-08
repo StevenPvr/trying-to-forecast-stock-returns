@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Streaming preprocessor: chunk-based target and feature computation for large datasets."""
+
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -269,12 +271,11 @@ def _build_stage1_group(
     *,
     feature_fill_limits: dict[str, int | None],
     protected_columns: list[str],
-    spec_provider: object,
 ) -> pd.DataFrame:
     filtered = filter_from_start_date(group)
     if filtered.empty:
         return filtered
-    targeted = create_target_main_group(filtered, spec_provider=spec_provider)
+    targeted = create_target_main_group(filtered)
     split_ready = assign_dataset_splits(targeted)
     if split_ready.empty:
         return split_ready
@@ -289,13 +290,10 @@ def write_stage1_dataset(
     input_path: Path,
     stage1_path: Path,
 ) -> StageWriteSummary:
-    from core.src.meta_model.broker_xtb.specs import build_default_spec_provider
-
     source_columns = _parquet_columns(input_path)
     feature_registry = build_feature_registry_from_columns(source_columns)
     feature_fill_limits = build_feature_fill_limits(feature_registry)
     protected_columns = build_protected_columns()
-    spec_provider = build_default_spec_provider()
     writer = IncrementalDatasetWriter(stage1_path, None, log_name="preprocessing stage1")
     writer.reset()
     ticker_count = 0
@@ -304,7 +302,6 @@ def write_stage1_dataset(
             group,
             feature_fill_limits=feature_fill_limits,
             protected_columns=protected_columns,
-            spec_provider=spec_provider,
         )
         writer.write(stage1_group, ticker_count)
         if ticker_count == 1 or ticker_count % 25 == 0:

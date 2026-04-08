@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""WRDS data provider: credentials, connection, security aliases, and fundamentals."""
+
 import dataclasses
 import importlib
 import os

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Calendar feature pipeline: earnings dates, FOMC meetings, options expiry."""
+
 import dataclasses
 import logging
 from pathlib import Path

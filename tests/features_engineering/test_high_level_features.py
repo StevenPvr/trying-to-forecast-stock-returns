@@ -107,6 +107,27 @@ def test_add_high_level_features_aligns_earnings_sessions(tmp_path: Path) -> Non
     assert float(lookup.loc[pd.Timestamp("2024-01-05"), "earnings_days_to_next"]) == 0.0
 
 
+def test_add_high_level_features_ignores_unknown_earnings_sessions(tmp_path: Path) -> None:
+    earnings_path = tmp_path / "earnings.csv"
+    pd.DataFrame(
+        {
+            "ticker": ["AAA"],
+            "announcement_date": ["2024-01-03"],
+            "announcement_session": ["unknown"],
+            "fiscal_year": [2024],
+            "fiscal_quarter": [1],
+        },
+    ).to_csv(earnings_path, index=False)
+    input_dataset = _make_base_feature_dataset(periods=6).loc[
+        lambda frame: frame["ticker"] == "AAA"
+    ].reset_index(drop=True)
+
+    enriched = add_high_level_features(input_dataset, earnings_path=earnings_path)
+
+    assert set(enriched["earnings_days_to_next"].unique()) == {252.0}
+    assert set(enriched["earnings_days_since_last"].unique()) == {252.0}
+
+
 def test_add_high_level_features_requires_earnings_reference(tmp_path: Path) -> None:
     missing_path = tmp_path / "missing.csv"
 

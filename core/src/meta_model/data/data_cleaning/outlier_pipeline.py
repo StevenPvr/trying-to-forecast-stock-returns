@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Outlier detection pipeline: z-score flagging, winsorisation, and NaN reporting."""
+
 import logging
 from typing import cast
 

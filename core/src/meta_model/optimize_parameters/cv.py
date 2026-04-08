@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Walk-forward fold construction with configurable train/validation ratios."""
+
 from dataclasses import dataclass
 
 import numpy as np

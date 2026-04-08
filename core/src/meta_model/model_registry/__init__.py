@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+"""Model registry: specification, training, and prediction for all supported model families."""
+
 from core.src.meta_model.model_registry.main import (
     ModelArtifact,
     ModelSpec,

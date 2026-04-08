@@ -80,6 +80,32 @@ class _DummyCache:
             return values
         return values[np.asarray(row_indices, dtype=np.int64)]
 
+    def build_temporal_sample_row_indices(
+        self,
+        sample_size: int,
+        *,
+        minimum_date_count: int = 1,
+    ) -> np.ndarray:
+        if sample_size <= 0 or len(self._frame) <= sample_size:
+            return np.arange(len(self._frame), dtype=np.int64)
+        date_values = pd.to_datetime(cast(pd.Series, self._frame[DATE_COLUMN])).to_numpy(copy=False)
+        unique_dates = pd.Index(pd.to_datetime(date_values).drop_duplicates().sort_values())
+        date_count = min(len(unique_dates), max(minimum_date_count, sample_size // 2))
+        sampled_dates = pd.Index(
+            unique_dates.take(
+                np.unique(np.linspace(0, len(unique_dates) - 1, num=date_count, dtype=np.int64)),
+            ),
+        )
+        sampled_index = np.flatnonzero(
+            cast(pd.Series, self._frame[DATE_COLUMN]).isin(sampled_dates).to_numpy(),
+        )
+        if sampled_index.size <= sample_size:
+            return sampled_index
+        sampled_positions = np.unique(
+            np.linspace(0, sampled_index.size - 1, num=sample_size, dtype=np.int64),
+        )
+        return sampled_index[sampled_positions]
+
     @property
     def train_row_count(self) -> int:
         return len(self._frame)
@@ -163,6 +189,98 @@ def test_build_sfi_score_frame_applies_coverage_threshold() -> None:
     assert bool(best_row["passes_sfi"])
     assert not bool(noise_row["passes_coverage"])
     assert str(noise_row["sfi_drop_reason"]) == "low_coverage"
+
+
+def test_build_sfi_score_frame_requires_selection_gates() -> None:
+    frame = _make_train_frame()
+    cache = _DummyCache(frame)
+
+    def gated_out_scorer(feature_names: list[str]) -> SubsetEconomicScore:
+        del feature_names
+        fold_score = FoldEconomicScore(
+            index=1,
+            weight=1.0,
+            net_pnl_after_costs=0.01,
+            alpha_over_benchmark_net=0.01,
+            turnover_annualized=0.40,
+            max_drawdown=-0.05,
+            daily_rank_ic_mean=0.01,
+            daily_rank_ic_ir=-0.25,
+            daily_top_bottom_spread_mean=-0.02,
+        )
+        return SubsetEconomicScore(
+            feature_names=("feature_best",),
+            objective_score=0.01,
+            weighted_net_pnl_after_costs=0.01,
+            weighted_alpha_over_benchmark_net=0.01,
+            weighted_turnover_annualized=0.40,
+            weighted_max_drawdown=-0.05,
+            positive_fold_share=0.0,
+            median_fold_net_pnl=0.01,
+            lower_quartile_fold_net_pnl=0.01,
+            is_valid=False,
+            fold_scores=(fold_score,),
+            weighted_daily_rank_ic_mean=0.01,
+            weighted_daily_rank_ic_ir=-0.25,
+            weighted_daily_top_bottom_spread_mean=-0.02,
+        )
+
+    score_frame = build_sfi_score_frame(
+        cast(Any, cache),
+        ["feature_best"],
+        gated_out_scorer,
+        FeatureSelectionConfig(sfi_min_coverage_fraction=0.90),
+    )
+
+    row = cast(pd.DataFrame, score_frame.loc[score_frame["feature_name"] == "feature_best"]).iloc[0]
+    assert not bool(row["passes_sfi"])
+    assert str(row["sfi_drop_reason"]) == "failed_selection_gates"
+
+
+def test_build_sfi_score_frame_ignores_subset_backtest_guardrails() -> None:
+    frame = _make_train_frame()
+    cache = _DummyCache(frame)
+
+    def sfi_viable_scorer(feature_names: list[str]) -> SubsetEconomicScore:
+        del feature_names
+        fold_score = FoldEconomicScore(
+            index=1,
+            weight=1.0,
+            net_pnl_after_costs=-0.02,
+            alpha_over_benchmark_net=-0.01,
+            turnover_annualized=0.40,
+            max_drawdown=-0.05,
+            daily_rank_ic_mean=0.01,
+            daily_rank_ic_ir=0.15,
+            daily_top_bottom_spread_mean=-0.02,
+        )
+        return SubsetEconomicScore(
+            feature_names=("feature_best",),
+            objective_score=0.01,
+            weighted_net_pnl_after_costs=-0.02,
+            weighted_alpha_over_benchmark_net=-0.01,
+            weighted_turnover_annualized=0.40,
+            weighted_max_drawdown=-0.05,
+            positive_fold_share=1.0,
+            median_fold_net_pnl=-0.02,
+            lower_quartile_fold_net_pnl=-0.02,
+            is_valid=True,
+            fold_scores=(fold_score,),
+            weighted_daily_rank_ic_mean=0.01,
+            weighted_daily_rank_ic_ir=0.15,
+            weighted_daily_top_bottom_spread_mean=-0.02,
+        )
+
+    score_frame = build_sfi_score_frame(
+        cast(Any, cache),
+        ["feature_best"],
+        sfi_viable_scorer,
+        FeatureSelectionConfig(sfi_min_coverage_fraction=0.90),
+    )
+
+    row = cast(pd.DataFrame, score_frame.loc[score_frame["feature_name"] == "feature_best"]).iloc[0]
+    assert bool(row["passes_sfi"])
+    assert str(row["sfi_drop_reason"]) == "retained"
 
 
 def test_build_sfi_score_frame_falls_back_to_threads_when_process_pool_unavailable(
@@ -466,7 +584,7 @@ def test_target_distance_correlation_filter_avoids_threaded_dispatch(
     assert audit["feature_name"].tolist() == ["feature_signal"]
 
 
-def test_target_distance_correlation_filter_uses_bounded_prefix_sample(
+def test_target_distance_correlation_filter_uses_temporally_distributed_sample(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = _make_train_frame()
@@ -484,16 +602,30 @@ def test_target_distance_correlation_filter_uses_bounded_prefix_sample(
             "passes_sfi": [True],
         },
     )
-    captured_lengths: list[int] = []
+    captured_row_indices: list[np.ndarray] = []
 
-    def _fake_distance_correlation(left: np.ndarray, right: np.ndarray) -> float:
-        captured_lengths.append(len(left))
-        assert len(left) == len(right)
-        return 1.0
+    def _capture_rows(
+        cache: object,
+        feature_names: list[str],
+        target_values: np.ndarray,
+        *,
+        threshold: float,
+        row_indices: np.ndarray,
+    ) -> list[dict[str, object]]:
+        del cache, feature_names, target_values, threshold
+        captured_row_indices.append(np.asarray(row_indices, dtype=np.int64))
+        return [
+            {
+                "feature_name": "feature_signal",
+                "target_distance_correlation": 1.0,
+                "passes_target_correlation": True,
+                "drop_reason": "retained",
+            },
+        ]
 
     monkeypatch.setattr(
-        "core.src.meta_model.feature_selection.correlation._distance_correlation_numba_wrapper",
-        _fake_distance_correlation,
+        "core.src.meta_model.feature_selection.correlation._score_target_distance_correlation_rows",
+        _capture_rows,
     )
 
     survivors, audit = run_target_distance_correlation_filter(
@@ -508,7 +640,16 @@ def test_target_distance_correlation_filter_uses_bounded_prefix_sample(
 
     assert survivors == ["feature_signal"]
     assert audit["feature_name"].tolist() == ["feature_signal"]
-    assert captured_lengths == [10]
+    assert len(captured_row_indices) == 1
+    sampled_dates = pd.Index(
+        pd.to_datetime(
+            cache.build_feature_frame([], row_indices=captured_row_indices[0])[DATE_COLUMN],
+        ).drop_duplicates().sort_values(),
+    )
+    assert captured_row_indices[0].size == 10
+    assert len(sampled_dates) >= 5
+    assert sampled_dates[0] == pd.Timestamp("2020-01-01")
+    assert sampled_dates[-1] == pd.Timestamp("2020-02-03")
 
 
 def test_sfi_process_pool_is_disabled_for_in_memory_cache() -> None:

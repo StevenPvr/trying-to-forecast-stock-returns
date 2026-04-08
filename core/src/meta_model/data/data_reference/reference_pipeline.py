@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Reference-data pipeline: membership history, fundamentals, earnings from WRDS or bootstrap."""
+
 import dataclasses
 import io
 import logging
@@ -51,12 +53,18 @@ _NUMERIC_PROXY_COLUMNS: tuple[str, ...] = (
     "book_value",
     "trailing_eps",
 )
+FUNDAMENTALS_PROVENANCE_COLUMN: str = "fundamentals_provenance"
+WRDS_EVENT_PROVENANCE: str = "wrds_event"
+BOOTSTRAP_STRUCTURAL_PROVENANCE: str = "bootstrap_structural"
+BOOTSTRAP_PROXY_PROVENANCE: str = "bootstrap_proxy"
+UNKNOWN_ANNOUNCEMENT_SESSION: str = "unknown"
 _FUNDAMENTALS_COLUMNS: tuple[str, ...] = (
     "date",
     "ticker",
     "company_name",
     *_STRUCTURAL_COLUMNS,
     *_NUMERIC_PROXY_COLUMNS,
+    FUNDAMENTALS_PROVENANCE_COLUMN,
 )
 _EARNINGS_COLUMNS: tuple[str, ...] = (
     "ticker",
@@ -279,6 +287,7 @@ def _build_structural_rows(
     structural["date"] = start_ts
     for column in _NUMERIC_PROXY_COLUMNS:
         structural[column] = np.nan
+    structural[FUNDAMENTALS_PROVENANCE_COLUMN] = BOOTSTRAP_STRUCTURAL_PROVENANCE
     return _column_frame(structural, list(_FUNDAMENTALS_COLUMNS))
 
 
@@ -294,6 +303,7 @@ def _build_proxy_rows(
     proxy["enterprise_value"] = np.nan
     proxy["revenue_growth"] = np.nan
     proxy["current_ratio"] = np.nan
+    proxy[FUNDAMENTALS_PROVENANCE_COLUMN] = BOOTSTRAP_PROXY_PROVENANCE
     price_to_book = cast(
         pd.Series,
         pd.to_numeric(_column_series(proxy, "price_to_book"), errors="coerce"),
@@ -455,6 +465,7 @@ def build_wrds_fundamentals_history(
         - (cash_equivalents.fillna(0.0).loc[enterprise_value_mask] * 1_000_000.0)
     )
     filtered["beta"] = np.nan
+    filtered[FUNDAMENTALS_PROVENANCE_COLUMN] = WRDS_EVENT_PROVENANCE
     static_fields = _column_frame(
         current_constituents.drop_duplicates(subset=["ticker"]),
         ["ticker", "company_name", "sector", "industry"],
@@ -474,6 +485,9 @@ def merge_wrds_with_bootstrap_fallback(
     start_date: str,
     end_date: str,
 ) -> pd.DataFrame:
+    if FUNDAMENTALS_PROVENANCE_COLUMN not in wrds_history.columns:
+        wrds_history = pd.DataFrame(wrds_history.copy())
+        wrds_history[FUNDAMENTALS_PROVENANCE_COLUMN] = WRDS_EVENT_PROVENANCE
     wrds_tickers = set(pd.Index(wrds_history["ticker"]).dropna().astype(str))
     unresolved_membership = membership_history.loc[
         ~membership_history["ticker"].isin(wrds_tickers)
@@ -505,19 +519,30 @@ def build_earnings_history(fundamentals_history: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(
             f"Fundamentals history missing required earnings columns: {missing_preview}",
         )
+    if FUNDAMENTALS_PROVENANCE_COLUMN not in fundamentals_history.columns:
+        LOGGER.warning(
+            "Skipping earnings history build because fundamentals provenance is missing.",
+        )
+        return pd.DataFrame(columns=list(_EARNINGS_COLUMNS))
     prepared = _column_frame(fundamentals_history.copy(), ["date", "ticker"])
+    prepared[FUNDAMENTALS_PROVENANCE_COLUMN] = (
+        fundamentals_history[FUNDAMENTALS_PROVENANCE_COLUMN].fillna("").astype(str).str.strip()
+    )
     prepared["date"] = pd.to_datetime(_column_series(prepared, "date"), errors="coerce")
     prepared["ticker"] = _column_series(prepared, "ticker").astype(str).str.strip()
     prepared = prepared.loc[
         _column_series(prepared, "date").notna()
         & _column_series(prepared, "ticker").ne("")
+        & _column_series(prepared, FUNDAMENTALS_PROVENANCE_COLUMN).eq(WRDS_EVENT_PROVENANCE)
     ].drop_duplicates(subset=["ticker", "date"]).sort_values(["ticker", "date"]).reset_index(drop=True)
+    if prepared.empty:
+        return pd.DataFrame(columns=list(_EARNINGS_COLUMNS))
     announcement_dates = pd.to_datetime(_column_series(prepared, "date"))
     earnings_history = pd.DataFrame(
         {
             "ticker": _column_series(prepared, "ticker").astype(str),
             "announcement_date": announcement_dates.dt.strftime("%Y-%m-%d"),
-            "announcement_session": "after_close",
+            "announcement_session": UNKNOWN_ANNOUNCEMENT_SESSION,
             "fiscal_year": announcement_dates.dt.year.astype("int64"),
             "fiscal_quarter": (((announcement_dates.dt.month - 1) // 3) + 1).astype("int64"),
         }
@@ -563,7 +588,7 @@ def _load_xtb_stock_symbols(path: Path) -> set[str]:
     return {
         spec.symbol
         for spec in provider.specs
-        if spec.instrument_group == "stock_cfd"
+        if spec.instrument_group == "stock_cash"
     }
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Outlier diagnostic plots: distribution histograms, box plots, and time-series overlays."""
+
 import logging
 import os
 from importlib import import_module

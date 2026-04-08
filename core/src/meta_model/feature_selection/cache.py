@@ -12,6 +12,8 @@ import pandas as pd
 from core.src.meta_model.feature_selection.io import FeatureSelectionMetadata
 from core.src.meta_model.model_contract import DATE_COLUMN, MODEL_TARGET_COLUMN, REALIZED_RETURN_COLUMN, SPLIT_COLUMN, TICKER_COLUMN
 
+"""LRU-cached feature array store for the feature selection pipeline."""
+
 LOGGER: logging.Logger = logging.getLogger(__name__)
 SCORING_CONTEXT_COLUMNS: tuple[str, ...] = (
     DATE_COLUMN,
@@ -27,6 +29,7 @@ SCORING_CONTEXT_COLUMNS: tuple[str, ...] = (
 
 
 class FeatureSelectionRuntimeCache:
+    """Memory-bounded LRU cache of feature arrays backed by Parquet or in-memory DataFrame."""
     def __init__(
         self,
         dataset_source: Path | pd.DataFrame,
@@ -152,6 +155,51 @@ class FeatureSelectionRuntimeCache:
         rng = np.random.default_rng(self._random_seed)
         sampled = rng.choice(np.arange(self.train_row_count, dtype=np.int64), size=sample_size, replace=False)
         return np.sort(sampled)
+
+    def build_temporal_sample_row_indices(
+        self,
+        sample_size: int,
+        *,
+        minimum_date_count: int = 1,
+    ) -> np.ndarray:
+        if sample_size <= 0 or self.train_row_count <= sample_size:
+            return np.arange(self.train_row_count, dtype=np.int64)
+        if minimum_date_count <= 0:
+            raise ValueError("minimum_date_count must be strictly positive.")
+        date_values = pd.to_datetime(cast(pd.Series, self._train_context[DATE_COLUMN])).to_numpy(copy=False)
+        if date_values.size == 0:
+            return np.arange(0, dtype=np.int64)
+        boundary_positions = np.flatnonzero(date_values[1:] != date_values[:-1]) + 1
+        start_positions = np.concatenate((np.asarray([0], dtype=np.int64), boundary_positions))
+        stop_positions = np.concatenate((boundary_positions, np.asarray([len(date_values)], dtype=np.int64)))
+        rows_per_date = stop_positions - start_positions
+        unique_date_count = len(start_positions)
+        median_rows_per_date = max(1, int(np.median(rows_per_date)))
+        target_date_count = min(
+            unique_date_count,
+            max(minimum_date_count, int(np.ceil(sample_size / median_rows_per_date))),
+        )
+        sampled_date_positions = np.unique(
+            np.linspace(0, unique_date_count - 1, num=target_date_count, dtype=np.int64),
+        )
+        rows_per_selected_date = sample_size // len(sampled_date_positions)
+        remainder = sample_size % len(sampled_date_positions)
+        sampled_rows: list[np.ndarray] = []
+        for offset, date_position in enumerate(sampled_date_positions.tolist()):
+            start = int(start_positions[date_position])
+            stop = int(stop_positions[date_position])
+            available = stop - start
+            row_budget = rows_per_selected_date + (1 if offset < remainder else 0)
+            row_count = min(available, max(1, row_budget))
+            if row_count >= available:
+                sampled_rows.append(np.arange(start, stop, dtype=np.int64))
+                continue
+            sampled_rows.append(
+                np.unique(
+                    np.linspace(start, stop - 1, num=row_count, dtype=np.int64),
+                ),
+            )
+        return np.sort(np.concatenate(sampled_rows)).astype(np.int64, copy=False)
 
     def _ensure_feature_arrays(self, feature_names: list[str]) -> None:
         with self._cache_lock:

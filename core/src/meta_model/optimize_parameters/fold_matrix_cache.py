@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""DMatrix cache for XGBoost walk-forward folds (CPU and GPU paths)."""
+
 import gc
 import importlib
 import importlib.util
@@ -9,7 +11,10 @@ from typing import Any
 
 import numpy as np
 
-from core.src.meta_model.optimize_parameters.dataset import OptimizationDatasetBundle
+from core.src.meta_model.optimize_parameters.dataset import (
+    OptimizationDatasetBundle,
+    bundle_has_native_xgboost_categoricals,
+)
 from core.src.meta_model.optimize_parameters.fold_context import FoldEvaluationContext
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -47,6 +52,16 @@ def _build_dmatrix(
     return xgb_module.DMatrix(features, label=labels, feature_names=feature_names)
 
 
+def _dataset_bundle_supports_gpu_fold_cache(dataset_bundle: OptimizationDatasetBundle) -> bool:
+    return not bundle_has_native_xgboost_categoricals(dataset_bundle)
+
+
+def _numeric_feature_matrix_for_gpu_cache(dataset_bundle: OptimizationDatasetBundle) -> np.ndarray:
+    return np.ascontiguousarray(
+        dataset_bundle.feature_frame.to_numpy(dtype=np.float32, copy=False),
+    )
+
+
 def _load_cupy_module() -> Any | None:
     cupy_spec = importlib.util.find_spec("cupy")
     if cupy_spec is None:
@@ -66,7 +81,10 @@ def _build_fold_matrix_cache_gpu_resident(
     gpu_device_id: int,
 ) -> dict[int, CachedFoldMatrixBundle]:
     with cupy_module.cuda.Device(gpu_device_id):
-        gpu_feature_matrix = cupy_module.asarray(dataset_bundle.feature_matrix, dtype=cupy_module.float32)
+        gpu_feature_matrix = cupy_module.asarray(
+            _numeric_feature_matrix_for_gpu_cache(dataset_bundle),
+            dtype=cupy_module.float32,
+        )
         gpu_target_array = cupy_module.asarray(dataset_bundle.target_array, dtype=cupy_module.float32)
 
         cache_by_fold_index: dict[int, CachedFoldMatrixBundle] = {}
@@ -133,7 +151,7 @@ def _build_validation_matrix_cache_gpu_resident(
         for fold_context in fold_contexts:
             fold = fold_context.fold
             validation_features_cpu = np.ascontiguousarray(
-                dataset_bundle.feature_matrix[fold.validation_indices],
+                _numeric_feature_matrix_for_gpu_cache(dataset_bundle)[fold.validation_indices],
             )
             validation_labels_cpu = np.ascontiguousarray(
                 dataset_bundle.target_array[fold.validation_indices],
@@ -166,6 +184,11 @@ def build_fold_matrix_cache(
     gpu_device_id: int = 0,
 ) -> dict[int, CachedFoldMatrixBundle] | None:
     if not enabled:
+        return None
+    if not _dataset_bundle_supports_gpu_fold_cache(dataset_bundle):
+        LOGGER.info(
+            "CUDA fold matrix cache skipped: dataset uses native XGBoost categorical columns.",
+        )
         return None
 
     cupy_module = _load_cupy_module()

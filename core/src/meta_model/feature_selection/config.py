@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+"""Configuration for the feature selection pipeline (folds, thresholds, proxy backtest)."""
+
 from dataclasses import dataclass, field
 from typing import Any
 
 from core.src.meta_model.data.constants import RANDOM_SEED
 from core.src.meta_model.runtime_parallelism import resolve_available_cpu_count
 
-DEFAULT_SELECTION_FOLD_COUNT: int = 4
+DEFAULT_SELECTION_FOLD_COUNT: int = 10
 DEFAULT_GROUP_SAMPLE_SIZE: int = 50_000
 DEFAULT_MAX_GROUP_SIZE: int = 64
 DEFAULT_SEARCH_BEAM_WIDTH: int = 6
@@ -21,16 +23,17 @@ DEFAULT_PROXY_TRAINING_ROUNDS: int = 128
 DEFAULT_EMIT_INPUT_INVENTORY: bool = True
 DEFAULT_PROXY_TOP_FRACTION: float = 0.02
 DEFAULT_PROXY_OPEN_HURDLE_BPS: float = 0.0
-DEFAULT_PROXY_NEUTRALITY_MODE: str = "none"
+# Must match evaluate backtest (long-only selection); "none" is not a runtime mode there.
+DEFAULT_PROXY_NEUTRALITY_MODE: str = "long_only"
 DEFAULT_SFI_MIN_COVERAGE_FRACTION: float = 0.90
 DEFAULT_LINEAR_CORRELATION_THRESHOLD: float = 0.80
 DEFAULT_DISTANCE_CORRELATION_THRESHOLD: float = 0.80
 DEFAULT_DISTANCE_CORRELATION_SAMPLE_SIZE: int = 512
 DEFAULT_DISTANCE_CORRELATION_MAX_FEATURES: int = 384
 DEFAULT_TARGET_DISTANCE_CORRELATION_THRESHOLD: float = 0.005
-DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE: int = 512
-DEFAULT_TRAIN_SAMPLING_FRACTION: float = 0.20
-DEFAULT_SELECTED_FEATURE_COUNT: int = 50
+DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE: int = 2048
+DEFAULT_TRAIN_SAMPLING_FRACTION: float = 1.0
+DEFAULT_SELECTED_FEATURE_COUNT: int = 30
 
 
 def _default_parallel_workers() -> int:
@@ -58,6 +61,8 @@ def _build_default_proxy_xgboost_params() -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class FeatureSelectionConfig:
+    """Immutable configuration for feature selection: folds, pruning thresholds, proxy model."""
+
     random_seed: int = RANDOM_SEED
     fold_count: int = DEFAULT_SELECTION_FOLD_COUNT
     group_sample_size: int = DEFAULT_GROUP_SAMPLE_SIZE

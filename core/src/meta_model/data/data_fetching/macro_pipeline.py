@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Macroeconomic feature pipeline: FRED series, yield curve, term structure."""
+
 import dataclasses
 import logging
 import os

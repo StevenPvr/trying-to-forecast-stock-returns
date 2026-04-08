@@ -65,12 +65,12 @@ def build_price_context(group: pd.DataFrame) -> PriceContext:
         gap_return=gap_return,
         true_range_pct=true_range_pct,
         close_location=close_location,
-        avg_volume_21d=as_series(volume.rolling(21).mean(), index),
-        return_std_21d=as_series(returns_1d.rolling(21).std(), index),
-        gap_std_63d=as_series(gap_return.rolling(63).std(), index),
-        prior_high_63d=as_series(high_price.shift(1).rolling(63).max(), index),
-        prior_low_63d=as_series(low_price.shift(1).rolling(63).min(), index),
-        true_range_median_63d=as_series(true_range_pct.shift(1).rolling(63).median(), index),
+        avg_volume_21d=as_series(volume.rolling(21, min_periods=21).mean(), index),
+        return_std_21d=as_series(returns_1d.rolling(21, min_periods=21).std(), index),
+        gap_std_63d=as_series(gap_return.rolling(63, min_periods=63).std(), index),
+        prior_high_63d=as_series(high_price.shift(1).rolling(63, min_periods=63).max(), index),
+        prior_low_63d=as_series(low_price.shift(1).rolling(63, min_periods=63).min(), index),
+        true_range_median_63d=as_series(true_range_pct.shift(1).rolling(63, min_periods=63).median(), index),
     )
 
 

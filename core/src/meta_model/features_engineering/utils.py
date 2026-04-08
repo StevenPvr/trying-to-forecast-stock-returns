@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Shared utilities: safe division, rolling z-score, trend slope, efficiency ratio."""
+
 from typing import cast
 
 import numpy as np
@@ -20,8 +22,8 @@ def safe_divide(
 
 
 def rolling_zscore(series: pd.Series, window: int) -> pd.Series:
-    rolling_mean = cast(pd.Series, series.rolling(window).mean())
-    rolling_std = cast(pd.Series, series.rolling(window).std())
+    rolling_mean = cast(pd.Series, series.rolling(window, min_periods=window).mean())
+    rolling_std = cast(pd.Series, series.rolling(window, min_periods=window).std())
     return cast(pd.Series, safe_divide(series - rolling_mean, rolling_std))
 
 
@@ -48,5 +50,5 @@ def trend_r2(values: np.ndarray) -> float:
 
 def rolling_efficiency_ratio(close: pd.Series, window: int) -> pd.Series:
     directional_move = cast(pd.Series, close.diff(window).abs())
-    path_length = cast(pd.Series, close.diff().abs().rolling(window).sum())
+    path_length = cast(pd.Series, close.diff().abs().rolling(window, min_periods=window).sum())
     return cast(pd.Series, safe_divide(directional_move, path_length))

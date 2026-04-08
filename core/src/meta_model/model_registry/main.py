@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+"""Unified model registry: fit and predict for Ridge, ElasticNet, XGBoost, LightGBM, factor composite."""
+
+import logging
 from dataclasses import dataclass, field
 import importlib.util
 from typing import Any
@@ -7,12 +10,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+LOGGER: logging.Logger = logging.getLogger(__name__)
+
 from core.src.meta_model.model_contract import DATE_COLUMN, MODEL_TARGET_COLUMN
 from core.src.meta_model.optimize_parameters.search_space import load_xgboost_module
+from core.src.meta_model.xgboost_dmatrix import build_xgboost_dmatrix, prepare_xgboost_feature_frame
 
 
 @dataclass(frozen=True)
 class ModelSpec:
+    """Specification for training a single model (name, hyper-params, target)."""
+
     model_name: str
     params: dict[str, Any] = field(default_factory=dict)
     target_column: str = MODEL_TARGET_COLUMN
@@ -21,6 +29,8 @@ class ModelSpec:
 
 @dataclass(frozen=True)
 class ModelArtifact:
+    """Trained model artifact containing the fitted object and metadata."""
+
     model_name: str
     feature_names: list[str]
     training_metadata: dict[str, Any]
@@ -36,6 +46,7 @@ def build_default_model_specs(
     xgboost_params: dict[str, Any],
     xgboost_training_rounds: int,
 ) -> list[ModelSpec]:
+    """Build the canonical list of model specs for the evaluation pipeline."""
     return [
         ModelSpec(model_name="ridge", params={"alpha": 1.0}),
         ModelSpec(
@@ -214,14 +225,6 @@ def _fit_factor_composite_model(
     )
 
 
-def _sanitize_xgboost_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    sanitized = pd.DataFrame(frame.copy())
-    finite_mask = np.isfinite(sanitized.to_numpy(dtype=np.float64, copy=False))
-    if not bool(finite_mask.all()):
-        sanitized = sanitized.where(finite_mask, np.nan)
-    return sanitized
-
-
 def _fit_xgboost_model(
     train_frame: pd.DataFrame,
     feature_columns: list[str],
@@ -231,11 +234,21 @@ def _fit_xgboost_model(
     training_rounds: int,
 ) -> ModelArtifact:
     xgb = load_xgboost_module()
-    feature_frame = _sanitize_xgboost_feature_frame(train_frame.loc[:, feature_columns])
-    matrix = xgb.DMatrix(
+    feature_frame = prepare_xgboost_feature_frame(train_frame, feature_columns)
+    label_values = pd.to_numeric(
+        train_frame[target_column],
+        errors="coerce",
+    ).to_numpy(dtype=np.float64)
+    finite_label_mask = np.isfinite(label_values)
+    if not bool(finite_label_mask.all()):
+        feature_frame = pd.DataFrame(feature_frame.loc[finite_label_mask].copy())
+        label_values = label_values[finite_label_mask]
+    if label_values.size == 0:
+        raise ValueError("xgboost training frame has no finite target values.")
+    matrix = build_xgboost_dmatrix(
+        xgb,
         feature_frame,
-        label=train_frame[target_column].to_numpy(dtype=np.float32),
-        feature_names=feature_columns,
+        label_values.astype(np.float32, copy=False),
     )
     booster = xgb.train(
         params=dict(params),
@@ -265,7 +278,7 @@ def _fit_lightgbm_model(
 ) -> ModelArtifact:
     if not _lightgbm_available():
         raise ValueError("lightgbm is not available in the current environment.")
-    import lightgbm as lgb  # type: ignore
+    import lightgbm as lgb  # noqa: F811 -- conditional import guarded by availability check
 
     dataset = lgb.Dataset(
         train_frame.loc[:, feature_columns].to_numpy(dtype=np.float64, copy=False),
@@ -295,6 +308,7 @@ def fit_model(
     train_frame: pd.DataFrame,
     feature_columns: list[str],
 ) -> ModelArtifact:
+    """Dispatch training to the appropriate model backend and return the artifact."""
     if spec.model_name == "ridge":
         return _fit_ridge_model(
             train_frame,
@@ -393,8 +407,8 @@ def _predict_xgboost_model(
     feature_columns: list[str],
 ) -> np.ndarray:
     xgb = load_xgboost_module()
-    feature_frame = _sanitize_xgboost_feature_frame(frame.loc[:, feature_columns])
-    matrix = xgb.DMatrix(feature_frame, feature_names=feature_columns)
+    feature_frame = prepare_xgboost_feature_frame(frame, feature_columns)
+    matrix = build_xgboost_dmatrix(xgb, feature_frame, label=None)
     return np.asarray(artifact.fitted_object.predict(matrix), dtype=np.float64)
 
 
@@ -403,6 +417,7 @@ def predict_model(
     frame: pd.DataFrame,
     feature_columns: list[str],
 ) -> np.ndarray:
+    """Generate predictions using the trained *artifact* on *frame*."""
     if artifact.model_name == "ridge":
         return _predict_ridge_model(artifact, frame, feature_columns)
     if artifact.model_name == "elastic_net":

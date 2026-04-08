@@ -12,7 +12,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.src.meta_model.data.data_reference.reference_pipeline import (
+    BOOTSTRAP_PROXY_PROVENANCE,
+    BOOTSTRAP_STRUCTURAL_PROVENANCE,
+    FUNDAMENTALS_PROVENANCE_COLUMN,
     ReferenceBuildConfig,
+    WRDS_EVENT_PROVENANCE,
     build_earnings_history,
     build_fundamentals_history,
     build_membership_history,
@@ -103,18 +107,21 @@ def test_build_fundamentals_history_adds_structural_and_proxy_rows() -> None:
     assert aapl_rows.loc[0, "date"] == pd.Timestamp("2020-01-01")
     assert aapl_rows.loc[0, "sector"] == "Information Technology"
     assert pd.isna(aapl_rows.loc[0, "market_cap"])
+    assert aapl_rows.loc[0, FUNDAMENTALS_PROVENANCE_COLUMN] == BOOTSTRAP_STRUCTURAL_PROVENANCE
     assert aapl_rows.loc[1, "date"] == pd.Timestamp("2025-12-31")
     assert aapl_rows.loc[1, "market_cap"] == pytest.approx(3_000_000_000_000.0)
     assert aapl_rows.loc[1, "trailing_p_e"] == pytest.approx(30.0)
     assert aapl_rows.loc[1, "price_to_book"] == pytest.approx(10.0)
     assert aapl_rows.loc[1, "book_value"] == pytest.approx(20.0)
     assert aapl_rows.loc[1, "trailing_eps"] == pytest.approx(6.5)
+    assert aapl_rows.loc[1, FUNDAMENTALS_PROVENANCE_COLUMN] == BOOTSTRAP_PROXY_PROVENANCE
 
     msft_rows = result.loc[result["ticker"] == "MSFT"].reset_index(drop=True)
     assert len(msft_rows) == 1
     assert msft_rows.loc[0, "date"] == pd.Timestamp("2020-01-01")
     assert msft_rows.loc[0, "sector"] == "Information Technology"
     assert pd.isna(msft_rows.loc[0, "market_cap"])
+    assert msft_rows.loc[0, FUNDAMENTALS_PROVENANCE_COLUMN] == BOOTSTRAP_STRUCTURAL_PROVENANCE
 
 
 def test_build_wrds_fundamentals_history_uses_report_date_and_computes_ratios() -> None:
@@ -175,6 +182,7 @@ def test_build_wrds_fundamentals_history_uses_report_date_and_computes_ratios() 
     assert row["profit_margins"] == pytest.approx(0.2)
     assert row["return_on_equity"] == pytest.approx(0.25)
     assert row["enterprise_value"] == pytest.approx(1_012_000_000_000.0)
+    assert row[FUNDAMENTALS_PROVENANCE_COLUMN] == WRDS_EVENT_PROVENANCE
     assert "forward_eps" not in result.columns
     assert "forward_p_e" not in result.columns
 
@@ -225,6 +233,7 @@ def test_merge_wrds_with_bootstrap_fallback_backfills_unresolved_tickers() -> No
             "current_ratio": [3.0],
             "book_value": [20.0],
             "trailing_eps": [3.5],
+            FUNDAMENTALS_PROVENANCE_COLUMN: [WRDS_EVENT_PROVENANCE],
         }
     )
 
@@ -243,6 +252,8 @@ def test_merge_wrds_with_bootstrap_fallback_backfills_unresolved_tickers() -> No
     assert atge_rows.loc[0, "date"] == pd.Timestamp("2020-01-01")
     assert atge_rows.loc[1, "date"] == pd.Timestamp("2025-12-31")
     assert atge_rows.loc[1, "market_cap"] == pytest.approx(4_500_000_000.0)
+    assert atge_rows.loc[0, FUNDAMENTALS_PROVENANCE_COLUMN] == BOOTSTRAP_STRUCTURAL_PROVENANCE
+    assert atge_rows.loc[1, FUNDAMENTALS_PROVENANCE_COLUMN] == BOOTSTRAP_PROXY_PROVENANCE
 
 
 def test_resolve_fundamentals_source_prefers_wrds_extracts(tmp_path: Path) -> None:
@@ -289,7 +300,7 @@ def test_build_reference_outputs_prefers_wrds_extracts(tmp_path: Path) -> None:
         wrds_fundq_extract_csv=tmp_path / "fundq.csv",
     )
     config.xtb_instrument_specs_json.write_text(
-        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
+        '[{"symbol":"AAPL","instrument_group":"stock_cash","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
         encoding="utf-8",
     )
     config.wrds_fundq_extract_csv.write_text(
@@ -323,12 +334,17 @@ def test_build_reference_outputs_prefers_wrds_extracts(tmp_path: Path) -> None:
     assert len(membership_history) == 1
 
 
-def test_build_earnings_history_uses_after_close_and_calendar_quarters() -> None:
+def test_build_earnings_history_emits_only_wrds_event_rows_with_unknown_session() -> None:
     fundamentals_history = pd.DataFrame(
         {
             "date": pd.to_datetime(["2024-02-14", "2024-05-15", "2024-05-15"]),
             "ticker": ["AAPL", "AAPL", "MSFT"],
             "company_name": ["Apple", "Apple", "Microsoft"],
+            FUNDAMENTALS_PROVENANCE_COLUMN: [
+                WRDS_EVENT_PROVENANCE,
+                BOOTSTRAP_PROXY_PROVENANCE,
+                BOOTSTRAP_STRUCTURAL_PROVENANCE,
+            ],
         }
     )
 
@@ -336,15 +352,36 @@ def test_build_earnings_history_uses_after_close_and_calendar_quarters() -> None
 
     expected = pd.DataFrame(
         {
-            "ticker": ["AAPL", "AAPL", "MSFT"],
-            "announcement_date": ["2024-02-14", "2024-05-15", "2024-05-15"],
-            "announcement_session": ["after_close", "after_close", "after_close"],
-            "fiscal_year": [2024, 2024, 2024],
-            "fiscal_quarter": [1, 2, 2],
+            "ticker": ["AAPL"],
+            "announcement_date": ["2024-02-14"],
+            "announcement_session": ["unknown"],
+            "fiscal_year": [2024],
+            "fiscal_quarter": [1],
         }
     )
 
     pd.testing.assert_frame_equal(result.reset_index(drop=True), expected)
+
+
+def test_build_earnings_history_returns_empty_without_provenance_column() -> None:
+    fundamentals_history = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-02-14"]),
+            "ticker": ["AAPL"],
+            "company_name": ["Apple"],
+        }
+    )
+
+    result = build_earnings_history(fundamentals_history)
+
+    assert result.empty
+    assert result.columns.tolist() == [
+        "ticker",
+        "announcement_date",
+        "announcement_session",
+        "fiscal_year",
+        "fiscal_quarter",
+    ]
 
 
 def test_save_reference_outputs_persists_earnings_history(tmp_path: Path) -> None:
@@ -388,6 +425,10 @@ def test_ensure_earnings_history_output_rebuilds_canonical_csv(tmp_path: Path) -
             "date": ["2024-02-14", "2024-05-15"],
             "ticker": ["AAPL", "AAPL"],
             "company_name": ["Apple", "Apple"],
+            FUNDAMENTALS_PROVENANCE_COLUMN: [
+                WRDS_EVENT_PROVENANCE,
+                BOOTSTRAP_PROXY_PROVENANCE,
+            ],
         }
     ).to_csv(fundamentals_path, index=False)
 
@@ -398,7 +439,8 @@ def test_ensure_earnings_history_output_rebuilds_canonical_csv(tmp_path: Path) -
 
     saved = pd.read_csv(output_path)
     assert output_path == earnings_output
-    assert saved["announcement_session"].tolist() == ["after_close", "after_close"]
+    assert saved["announcement_session"].tolist() == ["unknown"]
+    assert saved["announcement_date"].tolist() == ["2024-02-14"]
 
 
 def test_build_reference_outputs_falls_back_when_wrds_direct_fails(tmp_path: Path) -> None:
@@ -406,7 +448,7 @@ def test_build_reference_outputs_falls_back_when_wrds_direct_fails(tmp_path: Pat
         xtb_instrument_specs_json=tmp_path / "xtb.json",
     )
     config.xtb_instrument_specs_json.write_text(
-        '[{"symbol":"AAPL","instrument_group":"stock_cfd","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
+        '[{"symbol":"AAPL","instrument_group":"stock_cash","currency":"USD","spread_bps":0.0,"slippage_bps":0.0,"long_swap_bps_daily":0.0,"short_swap_bps_daily":0.0,"margin_requirement":1.0,"max_adv_participation":0.05,"effective_from":"2000-01-01","effective_to":null}]',
         encoding="utf-8",
     )
     historical_components = pd.DataFrame(

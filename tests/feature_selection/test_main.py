@@ -63,6 +63,7 @@ def _make_preprocessed_dataset() -> pd.DataFrame:
                     "feature_signal": target_value + (0.01 * date_position),
                     "feature_duplicate": target_value + (0.05 * date_position),
                     "feature_noise": float(date_position),
+                    "earnings_days_to_next": float(date_position % 7),
                     "feature_low_coverage": (
                         np.nan
                         if split_by_date[current_date] == "train"
@@ -132,7 +133,7 @@ class TestFeatureSelection:
         config = SelectionConfig()
 
         assert config.parallel_workers == 9
-        assert config.selected_feature_count == 50
+        assert config.selected_feature_count == 30
 
     def test_build_selection_feature_columns_excludes_targets_and_metadata(self) -> None:
         dataset = _make_preprocessed_dataset()
@@ -145,6 +146,7 @@ class TestFeatureSelection:
         assert MODEL_TARGET_COLUMN not in feature_columns
         assert "feature_signal" in feature_columns
         assert "feature_noise" in feature_columns
+        assert "earnings_days_to_next" not in feature_columns
 
     def test_run_feature_selection_saves_new_stage_artifacts(self, tmp_path: Path) -> None:
         dataset_path = tmp_path / "preprocessed.parquet"
@@ -169,7 +171,13 @@ class TestFeatureSelection:
             str(feature_name)
             for feature_name in cast(list[object], selected_frame["feature_name"].tolist())
         ]
-        assert selected_feature_names == ["feature_signal", "feature_duplicate"]
+        assert selected_feature_names == [
+            "ticker",
+            "company_sector",
+            "company_industry",
+            "feature_signal",
+            "feature_duplicate",
+        ]
         assert output_bundle.filtered_dataset_parquet.exists()
         assert output_bundle.stability_scores_parquet.exists()
         assert output_bundle.selected_features_parquet.exists()
@@ -177,8 +185,10 @@ class TestFeatureSelection:
         assert output_bundle.linear_pruning_audit_parquet.exists()
         assert output_bundle.distance_correlation_audit_parquet.exists()
         assert output_bundle.target_correlation_audit_parquet.exists()
-        assert {"feature_signal", "feature_duplicate"} <= set(filtered_dataset.columns)
-        assert "hl_context_company_sector" in filtered_dataset.columns
+        assert {"feature_signal", "feature_duplicate", "ticker", "company_sector", "company_industry"} <= set(
+            filtered_dataset.columns,
+        )
+        assert "company_sector" in filtered_dataset.columns
         assert "hl_context_stock_open_price" in filtered_dataset.columns
         assert MODEL_TARGET_COLUMN in filtered_dataset.columns
         assert not score_frame.empty
@@ -245,7 +255,7 @@ class TestFeatureSelection:
         with pytest.raises(ValueError, match="Feature schema mismatch"):
             validate_filtered_dataset_matches_selection(filtered_dataset, selected_feature_names=["feature_a"])
 
-    def test_validate_filtered_dataset_matches_selection_preserves_selection_order(self) -> None:
+    def test_validate_filtered_dataset_matches_selection_ignores_column_order(self) -> None:
         filtered_dataset = pd.DataFrame(
             {
                 "date": pd.to_datetime(["2024-01-02"]),
@@ -259,7 +269,7 @@ class TestFeatureSelection:
 
         validate_filtered_dataset_matches_selection(
             filtered_dataset,
-            selected_feature_names=["feature_b", "feature_a"],
+            selected_feature_names=["feature_b", "feature_a", "ticker"],
         )
 
     def test_run_feature_selection_accepts_selected_context_feature(self, tmp_path: Path) -> None:
@@ -302,7 +312,13 @@ class TestFeatureSelection:
             )
 
         assert score_frame is not None
-        assert selected_frame["feature_name"].tolist() == ["feature_signal", "stock_open_price"]
+        assert selected_frame["feature_name"].tolist() == [
+            "ticker",
+            "company_sector",
+            "company_industry",
+            "feature_signal",
+            "stock_open_price",
+        ]
         assert "stock_open_price" in filtered_dataset.columns
         assert "hl_context_stock_open_price" in filtered_dataset.columns
 

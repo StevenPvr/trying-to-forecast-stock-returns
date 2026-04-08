@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Daily rank-IC context builder for Optuna objective evaluation."""
+
 import math
 from dataclasses import dataclass
 

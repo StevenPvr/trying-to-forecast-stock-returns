@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Cross-sectional, market-relative, and calendar features.
+
+Adds universe beta, idiosyncratic vol, cross-sectional ranks/z-scores,
+and cyclical calendar features.
+"""
+
 import numpy as np
 import pandas as pd
 
@@ -37,6 +43,7 @@ def _add_cyclical_time_feature(
 
 
 def build_daily_market_aggregates(data: pd.DataFrame) -> pd.DataFrame:
+    """Compute daily market-wide return and volume aggregates."""
     return_1d_col: str = f"{INTERNAL_FEATURE_PREFIX}return_1d"
     dollar_volume_col: str = f"{QUANT_FEATURE_PREFIX}dollar_volume"
 
@@ -98,6 +105,7 @@ def add_universe_market_features_for_ticker(
     data: pd.DataFrame,
     daily_market_aggregates: pd.DataFrame,
 ) -> pd.DataFrame:
+    """Add beta, correlation, idiosyncratic vol, and relative strength per ticker."""
     enriched: pd.DataFrame = data.sort_values("date").reset_index(drop=True).copy()
     enriched = enriched.merge(
         daily_market_aggregates,
@@ -151,22 +159,22 @@ def add_universe_market_features_for_ticker(
 
         for window in MARKET_WINDOWS:
             rolling_covariance: pd.Series = _as_series(
-                stock_return.rolling(window).cov(market_return),
+                stock_return.rolling(window, min_periods=window).cov(market_return),
                 idx,
             )
             market_variance: pd.Series = _as_series(
-                market_return.rolling(window).var(),
+                market_return.rolling(window, min_periods=window).var(),
                 idx,
             )
             beta: pd.Series = _as_series(
                 safe_divide(rolling_covariance, market_variance),
                 idx,
             )
-            correlation: pd.Series = _as_series(stock_return.rolling(window).corr(market_return), idx)
+            correlation: pd.Series = _as_series(stock_return.rolling(window, min_periods=window).corr(market_return), idx)
             idio_return: pd.Series = _as_series(stock_return - (beta * market_return), idx)
             market_log_return: pd.Series = _as_series(np.log1p(market_return.to_numpy()), idx)
             relative_strength: pd.Series = _as_series(
-                log_return.rolling(window).sum() - market_log_return.rolling(window).sum(),
+                log_return.rolling(window, min_periods=window).sum() - market_log_return.rolling(window, min_periods=window).sum(),
                 idx,
             )
 
@@ -175,7 +183,7 @@ def add_universe_market_features_for_ticker(
                 correlation.to_numpy()
             )
             enriched.loc[idx, f"{QUANT_FEATURE_PREFIX}idiosyncratic_vol_{window}d"] = (
-                idio_return.rolling(window).std().to_numpy() * np.sqrt(TRADING_DAYS_PER_YEAR)
+                idio_return.rolling(window, min_periods=window).std().to_numpy() * np.sqrt(TRADING_DAYS_PER_YEAR)
             )
             enriched.loc[idx, f"{QUANT_FEATURE_PREFIX}relative_strength_{window}d"] = (
                 relative_strength.to_numpy()
@@ -194,6 +202,7 @@ def add_universe_market_features_for_ticker(
 
 
 def add_universe_market_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Add universe-relative market features for all tickers."""
     daily_market_aggregates: pd.DataFrame = build_daily_market_aggregates(data)
     enriched_groups: list[pd.DataFrame] = []
     for _, group in data.groupby("ticker", sort=False):
@@ -204,6 +213,7 @@ def add_universe_market_features(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_cross_sectional_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Add daily cross-sectional rank and z-score for each base feature."""
     enriched: pd.DataFrame = data.copy()
 
     for feature_name in CROSS_SECTIONAL_BASE_FEATURES:
@@ -232,6 +242,7 @@ def add_cross_sectional_features(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_calendar_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Add cyclical time encodings and calendar indicator features."""
     enriched: pd.DataFrame = data.copy()
     dates: pd.Series = pd.to_datetime(enriched["date"])
 
@@ -253,6 +264,7 @@ def add_calendar_features(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def drop_internal_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """Remove internal intermediate columns (prefixed with ``_internal_``)."""
     internal_columns: list[str] = [
         column for column in data.columns if column.startswith(INTERNAL_FEATURE_PREFIX)
     ]

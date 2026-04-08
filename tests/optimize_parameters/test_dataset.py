@@ -48,12 +48,13 @@ def test_build_feature_columns_preserves_dataset_order() -> None:
         "ticker": ["AAA"],
         "dataset_split": ["train"],
         TARGET_COLUMN: [0.1],
+        "earnings_days_to_next": [2.0],
         "feature_b": [2.0],
         "feature_text": ["foo"],
         "feature_a": [1.0],
     })
 
-    assert build_feature_columns(data) == ["feature_b", "feature_a"]
+    assert build_feature_columns(data) == ["ticker", "feature_b", "feature_a"]
 
 
 def test_build_feature_columns_excludes_non_numeric_types() -> None:
@@ -67,7 +68,7 @@ def test_build_feature_columns_excludes_non_numeric_types() -> None:
         "feature_name": ["Agilent Technologies", "Apple"],
     })
 
-    assert build_feature_columns(data) == ["feature_float", "feature_bool"]
+    assert build_feature_columns(data) == ["ticker", "feature_float", "feature_bool"]
 
 
 def test_build_optimization_dataset_bundle_replaces_inf_with_nan(tmp_path: Path) -> None:
@@ -84,9 +85,10 @@ def test_build_optimization_dataset_bundle_replaces_inf_with_nan(tmp_path: Path)
 
     bundle = build_optimization_dataset_bundle(data, dataset_path)
 
-    assert bundle.feature_columns == ["feature_ok", "feature_bad"]
-    assert not np.isinf(bundle.feature_matrix).any()
-    assert np.isnan(bundle.feature_matrix[0, 1])
+    assert bundle.feature_columns == ["ticker", "feature_ok", "feature_bad"]
+    bad_values = bundle.feature_frame["feature_bad"].to_numpy(dtype=np.float64, copy=False)
+    assert not np.isinf(bad_values).any()
+    assert np.isnan(bad_values[0])
 
 
 if __name__ == "__main__":

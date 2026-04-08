@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Event-based features: gap events, range expansions, volume spikes, breakout recency."""
+
 import pandas as pd
 
 from core.src.meta_model.features_engineering.deep.helpers import days_since_last_true

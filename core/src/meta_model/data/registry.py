@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Feature registry: automatic metadata inference, schema hashing, and manifest management."""
+
 import hashlib
 import json
 from pathlib import Path
@@ -118,7 +120,7 @@ def _base_feature_metadata(column_name: str) -> dict[str, object]:
             MISSING_POLICY_COLUMN: LEAVE_MISSING_POLICY,
             IS_DATE_LEVEL_COLUMN: False,
             IS_CROSS_SECTIONAL_COLUMN: False,
-            ENABLED_FOR_ALPHA_COLUMN: True,
+            ENABLED_FOR_ALPHA_COLUMN: False,
         }
     if column_name.startswith(SIGNAL_FEATURE_PREFIX):
         return {
@@ -243,6 +245,7 @@ def _base_feature_metadata(column_name: str) -> dict[str, object]:
 
 
 def infer_feature_spec(column_name: str) -> dict[str, object]:
+    """Infer metadata (family, source, lag, missing policy) for a single feature column."""
     base_name, lag_days = _split_lag_suffix(column_name)
     base_metadata = _base_feature_metadata(base_name)
     availability_lag = cast(int, base_metadata[AVAILABILITY_LAG_COLUMN]) + lag_days
@@ -264,21 +267,25 @@ def _select_feature_columns(columns: list[str]) -> list[str]:
 
 
 def build_feature_registry_from_columns(columns: list[str]) -> pd.DataFrame:
+    """Build the full feature registry DataFrame from a list of column names."""
     feature_columns = _select_feature_columns(columns)
     rows = [infer_feature_spec(column_name) for column_name in sorted(feature_columns)]
     return pd.DataFrame(rows, columns=list(FEATURE_REGISTRY_COLUMNS))
 
 
 def build_feature_registry(data: pd.DataFrame) -> pd.DataFrame:
+    """Build the feature registry from a preprocessed DataFrame's columns."""
     return build_feature_registry_from_columns(list(data.columns))
 
 
 def load_feature_registry(path: Path) -> pd.DataFrame:
+    """Load a saved feature registry from Parquet."""
     registry = pd.read_parquet(path)
     return registry.loc[:, list(FEATURE_REGISTRY_COLUMNS)].copy()
 
 
 def save_feature_registry(registry: pd.DataFrame, parquet_path: Path, json_path: Path) -> None:
+    """Persist the feature registry to Parquet and JSON."""
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     ordered = registry.loc[:, list(FEATURE_REGISTRY_COLUMNS)].sort_values(FEATURE_NAME_COLUMN).reset_index(drop=True)
@@ -290,6 +297,7 @@ def save_feature_registry(registry: pd.DataFrame, parquet_path: Path, json_path:
 
 
 def compute_feature_schema_hash(feature_names: list[str]) -> str:
+    """Return the SHA-256 hex digest of the sorted feature name list."""
     ordered = "\n".join(feature_names).encode("utf-8")
     return hashlib.sha256(ordered).hexdigest()
 
@@ -298,6 +306,7 @@ def save_feature_schema_manifest(
     feature_names: list[str],
     manifest_path: Path,
 ) -> None:
+    """Write a JSON manifest with feature names and their schema hash."""
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "feature_names": feature_names,
@@ -307,6 +316,7 @@ def save_feature_schema_manifest(
 
 
 def load_feature_schema_manifest(manifest_path: Path) -> dict[str, object]:
+    """Load a previously saved feature schema manifest from JSON."""
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 

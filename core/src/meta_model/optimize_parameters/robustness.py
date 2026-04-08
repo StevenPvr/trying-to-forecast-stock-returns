@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Multi-window robustness: complexity penalty and aggregation across train windows."""
+
 from dataclasses import dataclass
 
 import numpy as np

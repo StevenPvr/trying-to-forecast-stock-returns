@@ -241,6 +241,58 @@ def test_xgboost_fit_and_predict_replace_infinite_features_with_nan(monkeypatch:
     assert np.isfinite(predictions).all()
 
 
+def test_xgboost_fit_drops_non_finite_target_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    train_frame = pd.DataFrame({
+        "date": pd.date_range("2022-01-03", periods=5, freq="B"),
+        "ticker": ["AAA", "BBB", "CCC", "DDD", "EEE"],
+        "feature_a": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "feature_b": [0.5, 1.0, 1.5, 2.0, 2.5],
+        MODEL_TARGET_COLUMN: [0.1, np.inf, 0.3, -np.inf, 0.5],
+    })
+
+    observed_labels: list[np.ndarray] = []
+
+    class _FakeBooster:
+        @staticmethod
+        def predict(matrix: object) -> np.ndarray:
+            data = np.asarray(getattr(matrix, "data").to_numpy(dtype=np.float64), dtype=np.float64)
+            return np.nanmean(data, axis=1)
+
+    class _FakeXGBoostModule:
+        @staticmethod
+        def DMatrix(data: object, label: object | None = None, feature_names: list[str] | None = None) -> object:
+            del feature_names
+            frame = pd.DataFrame(data)
+            if label is not None:
+                label_array = np.asarray(label, dtype=np.float64)
+                observed_labels.append(label_array)
+                assert np.isfinite(label_array).all()
+                assert len(label_array) == 3
+            return type("_FakeMatrix", (), {"data": frame, "label": label})()
+
+        @staticmethod
+        def train(
+            *,
+            params: dict[str, object],
+            dtrain: object,
+            num_boost_round: int,
+            verbose_eval: bool,
+        ) -> _FakeBooster:
+            del params, dtrain, num_boost_round, verbose_eval
+            return _FakeBooster()
+
+    monkeypatch.setattr(model_registry_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
+
+    artifact = fit_model(
+        ModelSpec(model_name="xgboost", params={"eta": 0.05}, training_rounds=5),
+        train_frame,
+        ["feature_a", "feature_b"],
+    )
+
+    assert artifact.model_name == "xgboost"
+    assert len(observed_labels) == 1
+
+
 if __name__ == "__main__":
     import pytest
 

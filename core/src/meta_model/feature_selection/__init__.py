@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Feature selection pipeline: SFI scoring, correlation pruning, and wrapper search."""
+
 from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
 from core.src.meta_model.feature_selection.main import run_feature_selection
 

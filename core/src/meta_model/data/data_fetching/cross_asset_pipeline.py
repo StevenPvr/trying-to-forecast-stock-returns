@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Cross-asset feature pipeline: VIX, gold, oil, treasuries, FX, and crypto proxies."""
+
 import dataclasses
 import logging
 import time

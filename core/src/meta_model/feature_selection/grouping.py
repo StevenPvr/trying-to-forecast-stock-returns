@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Feature bucketing and grouping by family, stem, and window for the wrapper search."""
+
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass

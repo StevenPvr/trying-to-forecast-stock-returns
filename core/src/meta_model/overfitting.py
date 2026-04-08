@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Overfitting diagnostics: Probabilistic Sharpe Ratio, Deflated Sharpe, PBO."""
+
 from dataclasses import asdict, dataclass
 from itertools import combinations
 from statistics import NormalDist
@@ -14,6 +16,8 @@ _EULER_GAMMA: float = 0.5772156649015329
 
 @dataclass(frozen=True)
 class OverfittingDiagnostics:
+    """Immutable snapshot of overfitting risk metrics for a given strategy."""
+
     trial_count: int
     pbo: float
     sharpe_ratio: float
@@ -23,6 +27,7 @@ class OverfittingDiagnostics:
 
 
 def compute_sharpe_ratio(returns: pd.Series, *, periods_per_year: int = 252) -> float:
+    """Annualised Sharpe ratio (excess return / volatility, zero risk-free rate)."""
     clean_returns = pd.Series(returns, dtype=float).dropna()
     if clean_returns.empty:
         return 0.0
@@ -38,6 +43,7 @@ def compute_probabilistic_sharpe_ratio(
     benchmark_sharpe: float,
     periods_per_year: int = 252,
 ) -> float:
+    """Probability that the true Sharpe exceeds *benchmark_sharpe* (Bailey & Lopez de Prado)."""
     clean_returns = pd.Series(returns, dtype=float).dropna()
     if len(clean_returns) < 2:
         return 0.0
@@ -62,6 +68,7 @@ def compute_minimum_track_record_length(
     confidence_level: float = 0.95,
     periods_per_year: int = 252,
 ) -> float:
+    """Minimum number of observations to reject H0: Sharpe <= *benchmark_sharpe*."""
     clean_returns = pd.Series(returns, dtype=float).dropna()
     if clean_returns.empty:
         return float("inf")
@@ -80,6 +87,7 @@ def compute_minimum_track_record_length(
 
 
 def compute_expected_max_sharpe(trial_count: int) -> float:
+    """Expected maximum Sharpe under the null across *trial_count* independent trials."""
     if trial_count <= 1:
         return 0.0
     adjusted_trial_count = max(float(trial_count), 2.0)
@@ -94,6 +102,7 @@ def compute_deflated_sharpe_ratio(
     trial_count: int,
     periods_per_year: int = 252,
 ) -> float:
+    """Deflated Sharpe Ratio accounting for multiple testing across *trial_count* trials."""
     benchmark_sharpe = compute_expected_max_sharpe(trial_count)
     return compute_probabilistic_sharpe_ratio(
         returns,
@@ -108,6 +117,7 @@ def estimate_probability_of_backtest_overfitting(
     fold_column_prefix: str = "fold_",
     score_column_suffix: str = "_daily_rank_ic",
 ) -> float:
+    """Probability of Backtest Overfitting via combinatorial purged cross-validation."""
     fold_columns = [
         column
         for column in trials_frame.columns
@@ -139,6 +149,7 @@ def build_overfitting_diagnostics(
     trial_count: int,
     trials_frame: pd.DataFrame | None = None,
 ) -> OverfittingDiagnostics:
+    """Compute all overfitting diagnostics in a single call."""
     pbo = 0.0 if trials_frame is None else estimate_probability_of_backtest_overfitting(trials_frame)
     sharpe_ratio = compute_sharpe_ratio(returns)
     probabilistic_sharpe_ratio = compute_probabilistic_sharpe_ratio(returns, benchmark_sharpe=0.0)
@@ -158,4 +169,5 @@ def build_overfitting_diagnostics(
 
 
 def diagnostics_to_payload(diagnostics: OverfittingDiagnostics) -> dict[str, float]:
+    """Serialise diagnostics to a flat dict of floats for JSON output."""
     return {key: float(value) for key, value in asdict(diagnostics).items()}

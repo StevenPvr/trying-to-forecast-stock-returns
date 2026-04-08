@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Sentiment feature pipeline: AAII, VIX put/call ratio, and Fear & Greed proxies."""
+
 import dataclasses
 import io
 import logging

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Lag-feature generator: shift selected features by configurable day offsets."""
+
 import logging
 
 import pandas as pd

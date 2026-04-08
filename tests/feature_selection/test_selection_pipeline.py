@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from core.src.meta_model.feature_selection.selection_pipeline import build_final_candidate_feature_names
 
 
-def test_build_final_candidate_feature_names_rescues_broker_features() -> None:
+def test_build_final_candidate_feature_names_does_not_reinject_broker_bypass_features() -> None:
     sfi_scores = pd.DataFrame(
         {
             "feature_name": [
@@ -43,8 +43,6 @@ def test_build_final_candidate_feature_names_rescues_broker_features() -> None:
     assert candidate_names == [
         "quant_alpha",
         "xtb_spread_to_gap_abs_lag_21d",
-        "xtb_expected_intraday_cost_rate_lag_21d",
-        "xtb_spread_bps",
     ]
 
 

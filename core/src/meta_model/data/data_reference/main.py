@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Entry point for the reference-data generation pipeline."""
+
 import logging
 import sys
 from pathlib import Path

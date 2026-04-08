@@ -13,6 +13,8 @@ from core.src.meta_model.feature_selection.cache import FeatureSelectionRuntimeC
 from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
 from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
 
+"""Correlation-based feature pruning: linear Spearman, distance correlation, and target dCor."""
+
 LOGGER: logging.Logger = logging.getLogger(__name__)
 _numba_spec = importlib.util.find_spec("numba")
 NUMBA_AVAILABLE: bool = _numba_spec is not None
@@ -54,6 +56,7 @@ def run_incremental_linear_correlation_pruning(
     sfi_frame: pd.DataFrame,
     config: FeatureSelectionConfig,
 ) -> tuple[list[str], pd.DataFrame]:
+    """Prune features by Spearman rank correlation within stem/family/global scopes."""
     survivors = _extract_sfi_survivors(sfi_frame)
     sampled = cache.build_sampled_feature_frame(survivors, sample_size=config.group_sample_size)
     LOGGER.info(
@@ -84,6 +87,7 @@ def run_incremental_distance_correlation_pruning(
     linear_survivors: list[str],
     config: FeatureSelectionConfig,
 ) -> tuple[list[str], pd.DataFrame]:
+    """Prune features by distance correlation within stem/family/global scopes."""
     candidate_features = _rank_features_by_sfi(sfi_frame, linear_survivors)
     sampled = cache.build_sampled_feature_frame(
         candidate_features,
@@ -117,6 +121,7 @@ def run_target_distance_correlation_filter(
     feature_names: list[str],
     config: FeatureSelectionConfig,
 ) -> tuple[list[str], pd.DataFrame]:
+    """Drop features whose distance correlation with the target falls below threshold."""
     ranked_features = _rank_features_by_sfi(sfi_frame, feature_names)
     empty_audit = pd.DataFrame(
         columns=[
@@ -132,7 +137,11 @@ def run_target_distance_correlation_filter(
         cache.train_row_count,
         max(1, config.target_distance_correlation_sample_size),
     )
-    target_row_indices = np.arange(sample_row_count, dtype=np.int64)
+    target_row_indices = cache.build_temporal_sample_row_indices(
+        sample_row_count,
+        minimum_date_count=max(1, min(16, sample_row_count)),
+    )
+    sample_row_count = int(target_row_indices.size)
     train_frame = cache.build_feature_frame([], row_indices=target_row_indices)
     target_values = _resolve_distance_input(cast(pd.Series, train_frame[MODEL_TARGET_COLUMN]))
     worker_count = min(max(1, config.parallel_workers), len(ranked_features))

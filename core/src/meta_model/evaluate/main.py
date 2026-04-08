@@ -58,6 +58,7 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ModelEvaluationResult:
+    """Immutable result of evaluating one model: predictions, trades, daily PnL, summary."""
     model_name: str
     predictions: pd.DataFrame
     trades: pd.DataFrame
@@ -67,6 +68,7 @@ class ModelEvaluationResult:
 
 @dataclass(frozen=True)
 class EvaluateRuntimeContext:
+    """Runtime context: loaded dataset, features, model specs, cost config."""
     dataset: pd.DataFrame
     feature_columns: list[str]
     model_specs: list[ModelSpec]
@@ -182,32 +184,29 @@ def _log_cost_profile(spec_provider: BrokerSpecProvider) -> None:
     stock_specs = [
         spec
         for spec in spec_provider.specs
-        if spec.instrument_group == "stock_cfd"
+        if spec.instrument_group == "stock_cash"
         and not spec.symbol.startswith("__default")
     ]
     if not stock_specs:
         return
-    spread_bps = np.asarray([spec.spread_bps for spec in stock_specs], dtype=np.float64)
-    slippage_bps = np.asarray([spec.slippage_bps for spec in stock_specs], dtype=np.float64)
-    long_swap_bps_daily = np.asarray(
-        [spec.long_swap_bps_daily for spec in stock_specs],
+    minimum_order_value_eur = np.asarray(
+        [spec.minimum_order_value_eur for spec in stock_specs],
         dtype=np.float64,
     )
-    short_swap_bps_daily = np.asarray(
-        [spec.short_swap_bps_daily for spec in stock_specs],
+    monthly_free_turnover_eur = np.asarray(
+        [spec.monthly_commission_free_turnover_eur for spec in stock_specs],
+        dtype=np.float64,
+    )
+    fx_conversion_bps = np.asarray(
+        [spec.fx_conversion_bps for spec in stock_specs],
         dtype=np.float64,
     )
     LOGGER.info(
-        "XTB equity cost profile (specs; commission-free cash assumption): symbols=%d | spread_bps(avg/min/max)=%.3f/%.3f/%.3f | slippage_bps(avg/min/max)=%.3f/%.3f/%.3f | long_swap_bps_daily(avg)=%.3f | short_swap_bps_daily(avg)=%.3f",
+        "XTB cash-equity cost profile: symbols=%d | minimum_order_value_eur(avg)=%.2f | monthly_free_turnover_eur(avg)=%.2f | fx_conversion_bps(avg)=%.2f",
         len(stock_specs),
-        float(spread_bps.mean()),
-        float(spread_bps.min()),
-        float(spread_bps.max()),
-        float(slippage_bps.mean()),
-        float(slippage_bps.min()),
-        float(slippage_bps.max()),
-        float(long_swap_bps_daily.mean()),
-        float(short_swap_bps_daily.mean()),
+        float(minimum_order_value_eur.mean()),
+        float(monthly_free_turnover_eur.mean()),
+        float(fx_conversion_bps.mean()),
     )
 
 
@@ -250,7 +249,10 @@ def _build_runtime_context(
             dataset,
             execution_lag_days=config.execution_lag_days,
         ),
-        xtb_cost_config=XtbCostConfig(broker_spec_provider=spec_provider),
+        xtb_cost_config=XtbCostConfig(
+            account_currency=config.account_currency,
+            broker_spec_provider=spec_provider,
+        ),
         xgboost_trials=_load_xgboost_trials(),
     )
 
@@ -287,7 +289,11 @@ def _evaluate_single_model(
     context: EvaluateRuntimeContext,
     config: BacktestConfig,
 ) -> ModelEvaluationResult:
-    state = BacktestState()
+    state = BacktestState(
+        initial_equity=config.starting_cash_eur,
+        current_equity=config.starting_cash_eur,
+        cash_balance=config.starting_cash_eur,
+    )
     prediction_parts: list[pd.DataFrame] = []
     for predicted_day in iter_model_prediction_days(
         context.dataset,
@@ -389,6 +395,7 @@ def _build_manual_trades(
         candidates=manual_candidates,
         active_trades=[],
         current_equity=_summary_float(selected_result.summary, "final_equity"),
+        cash_balance=_summary_float(selected_result.summary, "final_equity"),
         hold_period_days=config.hold_period_days,
         allocation_fraction=config.allocation_fraction,
         action_cap_fraction=config.action_cap_fraction,
@@ -398,6 +405,8 @@ def _build_manual_trades(
         open_hurdle_bps=config.open_hurdle_bps,
         apply_prediction_hurdle=config.apply_prediction_hurdle,
         unique_dates=pd.Index([latest_prediction_date]),
+        month_to_date_turnover_eur=0.0,
+        account_currency=xtb_cost_config.account_currency,
     )
 
 
@@ -429,6 +438,7 @@ def run_evaluate_pipeline(
     backtest_config: BacktestConfig | None = None,
     dataset_path: Path = FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    """Run the full evaluate pipeline: train, backtest, rank, and save outputs."""
     config = backtest_config or BacktestConfig()
     context = _build_runtime_context(config, dataset_path)
     model_results, leaderboard = _evaluate_models(context=context, config=config)
@@ -472,6 +482,7 @@ def run_evaluate_pipeline(
 
 
 def main() -> None:
+    """Entry point for the evaluate pipeline."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     run_evaluate_pipeline()
 

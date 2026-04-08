@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Feature pipeline: parallel per-ticker feature generation and assembly."""
+
 import logging
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path

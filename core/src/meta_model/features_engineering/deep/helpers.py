@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Shared helpers for the deep feature sub-package (series wrappers, day counters)."""
+
 from typing import cast
 
 import numpy as np

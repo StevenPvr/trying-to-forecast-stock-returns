@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+"""XTB reference snapshot builder.
+
+Downloads the XTB equity-table PDF, extracts US stock symbols, and produces a
+JSON instrument-specification snapshot consumed by the spec provider.
+"""
+
 import json
+import logging
 import re
 import urllib.request
 from pathlib import Path
@@ -8,8 +15,10 @@ from typing import cast
 
 from core.src.meta_model.data.paths import XTB_INSTRUMENT_SPECS_REFERENCE_JSON
 
+LOGGER: logging.Logger = logging.getLogger(__name__)
+
 XTB_EQUITY_TABLE_SOURCE_URL: str = "https://www.xtb.com/en/equity-table.pdf"
-STOCK_CFD_PAGE_COUNT: int = 31
+STOCK_PAGE_COUNT: int = 31
 DEFAULT_EFFECTIVE_FROM: str = "2000-01-01"
 _META_REFRESH_PATTERN: re.Pattern[str] = re.compile(
     r"url='([^']+)'",
@@ -48,6 +57,7 @@ def download_xtb_equity_pdf(
     *,
     source_url: str = XTB_EQUITY_TABLE_SOURCE_URL,
 ) -> Path:
+    """Download the XTB equity-table PDF, following meta-refresh redirects."""
     pdf_url = _resolve_pdf_url(source_url)
     payload = _download_bytes(pdf_url)
     if not payload.startswith(b"%PDF"):
@@ -63,11 +73,12 @@ def _load_pdf_text(pdf_path: Path) -> str:
     reader = PdfReader(str(pdf_path))
     return "".join(
         (page.extract_text() or "")
-        for page in reader.pages[:STOCK_CFD_PAGE_COUNT]
+        for page in reader.pages[:STOCK_PAGE_COUNT]
     )
 
 
 def extract_us_stock_symbols_from_pdf_text(pdf_text: str) -> list[str]:
+    """Extract deduplicated US stock symbols from raw PDF text, excluding close-only."""
     close_only_symbols = {
         symbol.replace(" ", "")
         for symbol in _CLOSE_ONLY_PATTERN.findall(pdf_text)
@@ -90,10 +101,9 @@ def extract_us_stock_symbols_from_pdf_text(pdf_text: str) -> list[str]:
 
 
 def _build_stock_entry(symbol: str, *, effective_from: str) -> dict[str, object]:
-    # Commission-free cash equity (e.g. XTB tier): no spread/swap/slippage in simulation; full cash margin.
     return {
         "symbol": symbol,
-        "instrument_group": "stock_cfd",
+        "instrument_group": "stock_cash",
         "currency": "USD",
         "spread_bps": 0.0,
         "slippage_bps": 0.0,
@@ -103,64 +113,16 @@ def _build_stock_entry(symbol: str, *, effective_from: str) -> dict[str, object]
         "max_adv_participation": 0.05,
         "effective_from": effective_from,
         "effective_to": None,
+        "commission_rate": 0.002,
+        "monthly_commission_free_turnover_eur": 100_000.0,
+        "minimum_commission_eur": 10.0,
+        "minimum_order_value_eur": 10.0,
+        "fx_conversion_bps": 50.0,
+        "annual_custody_fee_rate": 0.0002,
+        "custody_fee_threshold_eur": 250_000.0,
+        "monthly_custody_fee_min_eur": 10.0,
+        "supports_fractional_orders": True,
     }
-
-
-def _build_index_entries(*, effective_from: str) -> list[dict[str, object]]:
-    return [
-        {
-            "symbol": "DE40",
-            "instrument_group": "index_cfd",
-            "currency": "EUR",
-            "spread_bps": 8.0,
-            "slippage_bps": 2.0,
-            "long_swap_bps_daily": 1.5,
-            "short_swap_bps_daily": 1.5,
-            "margin_requirement": 0.05,
-            "max_adv_participation": 0.20,
-            "effective_from": effective_from,
-            "effective_to": None,
-        },
-        {
-            "symbol": "UK100",
-            "instrument_group": "index_cfd",
-            "currency": "GBP",
-            "spread_bps": 8.0,
-            "slippage_bps": 2.0,
-            "long_swap_bps_daily": 1.5,
-            "short_swap_bps_daily": 1.5,
-            "margin_requirement": 0.05,
-            "max_adv_participation": 0.20,
-            "effective_from": effective_from,
-            "effective_to": None,
-        },
-        {
-            "symbol": "US100",
-            "instrument_group": "index_cfd",
-            "currency": "USD",
-            "spread_bps": 8.0,
-            "slippage_bps": 2.0,
-            "long_swap_bps_daily": 1.5,
-            "short_swap_bps_daily": 1.5,
-            "margin_requirement": 0.05,
-            "max_adv_participation": 0.20,
-            "effective_from": effective_from,
-            "effective_to": None,
-        },
-        {
-            "symbol": "US500",
-            "instrument_group": "index_cfd",
-            "currency": "USD",
-            "spread_bps": 8.0,
-            "slippage_bps": 2.0,
-            "long_swap_bps_daily": 1.5,
-            "short_swap_bps_daily": 1.5,
-            "margin_requirement": 0.05,
-            "max_adv_participation": 0.20,
-            "effective_from": effective_from,
-            "effective_to": None,
-        },
-    ]
 
 
 def build_xtb_reference_snapshot_payload(
@@ -168,12 +130,11 @@ def build_xtb_reference_snapshot_payload(
     *,
     effective_from: str = DEFAULT_EFFECTIVE_FROM,
 ) -> list[dict[str, object]]:
-    stock_entries = [
+    """Build the JSON-serialisable payload for all *stock_symbols*."""
+    return [
         _build_stock_entry(symbol, effective_from=effective_from)
         for symbol in sorted(stock_symbols)
     ]
-    index_entries = _build_index_entries(effective_from=effective_from)
-    return stock_entries + index_entries
 
 
 def build_xtb_reference_snapshot_from_pdf(
@@ -181,10 +142,11 @@ def build_xtb_reference_snapshot_from_pdf(
     *,
     effective_from: str = DEFAULT_EFFECTIVE_FROM,
 ) -> list[dict[str, object]]:
+    """End-to-end: parse a PDF and return the full snapshot payload."""
     pdf_text = _load_pdf_text(pdf_path)
     stock_symbols = extract_us_stock_symbols_from_pdf_text(pdf_text)
     if not stock_symbols:
-        raise RuntimeError("No US stock CFD symbols were extracted from the XTB PDF.")
+        raise RuntimeError("No US stock symbols were extracted from the XTB PDF.")
     return build_xtb_reference_snapshot_payload(
         stock_symbols,
         effective_from=effective_from,
@@ -196,6 +158,7 @@ def save_xtb_reference_snapshot(
     *,
     output_path: Path = XTB_INSTRUMENT_SPECS_REFERENCE_JSON,
 ) -> Path:
+    """Write the snapshot payload to *output_path* as pretty-printed JSON."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""One-standard-error trial selection from the Optuna study ledger."""
+
 from dataclasses import dataclass
 
 import numpy as np

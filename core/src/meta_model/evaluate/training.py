@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Walk-forward retraining: build training frames, train models, and yield daily predictions."""
+
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -19,6 +21,7 @@ from core.src.meta_model.model_contract import (
     TICKER_COLUMN,
 )
 from core.src.meta_model.optimize_parameters.search_space import load_xgboost_module
+from core.src.meta_model.xgboost_dmatrix import build_xgboost_dmatrix, prepare_xgboost_feature_frame
 
 
 def _format_duration(seconds: float) -> str:
@@ -38,6 +41,7 @@ def build_available_training_frame(
     prediction_date: pd.Timestamp,
     label_embargo_days: int,
 ) -> pd.DataFrame:
+    """Return training rows up to *prediction_date* minus the label embargo."""
     ordered = data.sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
     unique_dates = pd.Index(pd.to_datetime(ordered[DATE_COLUMN]).drop_duplicates().sort_values())
     matching_positions = np.flatnonzero(unique_dates == prediction_date)
@@ -66,6 +70,7 @@ def build_xgboost_training_params(
     random_seed: int = 7,
     nthread: int | None = None,
 ) -> dict[str, Any]:
+    """Merge tuned hyper-params with base XGBoost defaults (hist, squarederror)."""
     params: dict[str, Any] = {
         "objective": "reg:squarederror",
         "eval_metric": "rmse",
@@ -85,11 +90,13 @@ def train_final_xgboost_model(
     *,
     num_boost_round: int,
 ) -> Any:
+    """Train a final XGBoost booster on the full *training_frame*."""
     xgb = load_xgboost_module()
-    training_matrix = xgb.DMatrix(
-        training_frame.loc[:, feature_columns],
-        label=training_frame[TARGET_COLUMN].to_numpy(dtype=np.float32),
-        feature_names=feature_columns,
+    feature_slice = prepare_xgboost_feature_frame(training_frame, feature_columns)
+    training_matrix = build_xgboost_dmatrix(
+        xgb,
+        feature_slice,
+        training_frame[TARGET_COLUMN].to_numpy(dtype=np.float32),
     )
     return xgb.train(
         params=build_xgboost_training_params(tuned_params),
@@ -106,11 +113,10 @@ def predict_test_frame(
     *,
     execution_date: pd.Timestamp,
 ) -> pd.DataFrame:
+    """Score *test_frame* using a trained booster, tagging with *execution_date*."""
     xgb = load_xgboost_module()
-    test_matrix = xgb.DMatrix(
-        test_frame.loc[:, feature_columns],
-        feature_names=feature_columns,
-    )
+    test_slice = prepare_xgboost_feature_frame(test_frame, feature_columns)
+    test_matrix = build_xgboost_dmatrix(xgb, test_slice, label=None)
     predictions = np.asarray(booster.predict(test_matrix), dtype=np.float64)
     predicted = test_frame.copy()
     predicted[SIGNAL_DATE_COLUMN] = pd.to_datetime(predicted[DATE_COLUMN])
@@ -297,6 +303,7 @@ def iter_model_prediction_days(
     execution_lag_days: int,
     logger: Any,
 ) -> Iterator[pd.DataFrame]:
+    """Yield one predicted DataFrame per test date using walk-forward retraining."""
     ordered = data.sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
     test_dates = pd.Index(
         pd.to_datetime(

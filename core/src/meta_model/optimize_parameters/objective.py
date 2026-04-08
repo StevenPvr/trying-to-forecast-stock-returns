@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Objective aggregation: fold RMSE, rank IC, and bootstrap confidence intervals."""
+
 import math
 
 import numpy as np

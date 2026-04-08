@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Objective function: fold-level economic scoring and selection gate logic."""
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,6 +11,8 @@ from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
 
 @dataclass(frozen=True)
 class FoldEconomicScore:
+    """Economic score for a single cross-validation fold."""
+
     index: int
     weight: float
     net_pnl_after_costs: float
@@ -22,6 +26,8 @@ class FoldEconomicScore:
 
 @dataclass(frozen=True)
 class SubsetEconomicScore:
+    """Aggregated economic score across all folds for a feature subset."""
+
     feature_names: tuple[str, ...]
     objective_score: float
     weighted_net_pnl_after_costs: float
@@ -42,6 +48,7 @@ def aggregate_subset_score(
     feature_names: list[str],
     fold_scores: list[FoldEconomicScore],
 ) -> SubsetEconomicScore:
+    """Compute weighted aggregates across folds and return a ``SubsetEconomicScore``."""
     if not fold_scores:
         return SubsetEconomicScore(
             feature_names=tuple(sorted(feature_names)),
@@ -92,6 +99,7 @@ def is_candidate_move_acceptable(
     current_score: SubsetEconomicScore | None,
     config: FeatureSelectionConfig,
 ) -> bool:
+    """Return True if *candidate_score* improves on *current_score* within guardrails."""
     if not passes_selection_gates(candidate_score, config):
         return False
     if current_score is None:
@@ -144,10 +152,24 @@ def passes_selection_gates(
     candidate_score: SubsetEconomicScore,
     config: FeatureSelectionConfig,
 ) -> bool:
+    """Return True if *candidate_score* passes all hard selection gates."""
     return (
         candidate_score.objective_score > 0.0
         and candidate_score.weighted_daily_rank_ic_ir > 0.0
         and candidate_score.weighted_daily_top_bottom_spread_mean > 0.0
+        and candidate_score.positive_fold_share >= config.positive_fold_share_min
+        and candidate_score.lower_quartile_fold_net_pnl >= config.lower_quartile_fold_pnl_floor
+    )
+
+
+def passes_sfi_gates(
+    candidate_score: SubsetEconomicScore,
+    config: FeatureSelectionConfig,
+) -> bool:
+    """Return True if *candidate_score* passes the lighter SFI-stage gates."""
+    return (
+        candidate_score.objective_score > 0.0
+        and candidate_score.weighted_daily_rank_ic_ir > 0.0
         and candidate_score.positive_fold_share >= config.positive_fold_share_min
     )
 
@@ -157,5 +179,6 @@ __all__ = [
     "SubsetEconomicScore",
     "aggregate_subset_score",
     "is_candidate_move_acceptable",
+    "passes_sfi_gates",
     "passes_selection_gates",
 ]

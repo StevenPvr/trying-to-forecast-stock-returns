@@ -46,11 +46,12 @@ def test_build_feature_columns_preserves_dataset_order() -> None:
         "ticker": ["AAA"],
         "dataset_split": ["test"],
         MODEL_TARGET_COLUMN: [0.1],
+        "earnings_days_to_next": [2.0],
         "feature_b": [2.0],
         "feature_a": [1.0],
     })
 
-    assert build_feature_columns(data) == ["feature_b", "feature_a"]
+    assert build_feature_columns(data) == ["ticker", "feature_b", "feature_a"]
 
 
 if __name__ == "__main__":

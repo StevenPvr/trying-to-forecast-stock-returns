@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Feature dataset validation: schema checks, NaN budgets, and monotonicity guards."""
+
 import pandas as pd
 
 from core.src.meta_model.features_engineering.config import REQUIRED_TA_INPUT_COLUMNS

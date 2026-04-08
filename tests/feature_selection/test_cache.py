@@ -104,6 +104,36 @@ class TestFeatureSelectionCache:
         assert feature_frame.columns.tolist().count("stock_open_price") == 1
         assert feature_frame.columns.tolist().count("company_beta") == 1
 
+    def test_build_temporal_sample_row_indices_spans_train_history(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        dataset_path = tmp_path / "preprocessed.parquet"
+        dataset = _make_cache_dataset(feature_count=2)
+        dataset.to_parquet(dataset_path, index=False)
+        metadata = load_feature_selection_metadata(dataset_path)
+        cache = FeatureSelectionRuntimeCache(
+            dataset_path,
+            metadata,
+            random_seed=7,
+            max_cache_gib=0.05,
+        )
+
+        sampled_indices = cache.build_temporal_sample_row_indices(
+            sample_size=6,
+            minimum_date_count=4,
+        )
+        sampled_dates = pd.Index(
+            pd.to_datetime(
+                cache.build_feature_frame([], row_indices=sampled_indices)["date"],
+            ).drop_duplicates().sort_values(),
+        )
+
+        assert sampled_indices.size == 6
+        assert len(sampled_dates) >= 4
+        assert sampled_dates[0] == pd.Timestamp("2024-01-02")
+        assert sampled_dates[-1] == pd.Timestamp("2024-01-09")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

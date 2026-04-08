@@ -31,6 +31,7 @@ from core.src.meta_model.model_contract import (
     TICKER_COLUMN,
     TRAIN_SPLIT_NAME,
     is_excluded_feature_column,
+    is_temporarily_disabled_alpha_feature_column,
 )
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -122,6 +123,11 @@ def _load_parquet_schema(dataset_path: Path) -> ParquetSchemaInfo:
     )
 
 
+def read_parquet_column_names(dataset_path: Path) -> frozenset[str]:
+    schema_info = _load_parquet_schema(dataset_path)
+    return frozenset(schema_info.field_names)
+
+
 def build_feature_selection_input_inventory(
     dataset_path: Path = PREPROCESSED_OUTPUT_PARQUET,
 ) -> FeatureSelectionInputInventory:
@@ -130,7 +136,7 @@ def build_feature_selection_input_inventory(
     numeric_feature_columns = 0
     non_numeric_non_excluded_columns = 0
     for field in schema_info.fields:
-        if is_excluded_feature_column(field.name):
+        if is_excluded_feature_column(field.name) or is_temporarily_disabled_alpha_feature_column(field.name):
             excluded_columns += 1
             continue
         if _is_numeric_schema_field(field):
@@ -153,7 +159,7 @@ def build_feature_selection_input_inventory_from_frame(
     numeric_feature_columns = 0
     non_numeric_non_excluded_columns = 0
     for column_name in [str(name) for name in cast(list[object], data.columns.tolist())]:
-        if is_excluded_feature_column(column_name):
+        if is_excluded_feature_column(column_name) or is_temporarily_disabled_alpha_feature_column(column_name):
             excluded_columns += 1
             continue
         if pd.api.types.is_numeric_dtype(data[column_name]):
@@ -277,6 +283,24 @@ def build_feature_selection_metadata_from_frame(
     )
 
 
+def _select_temporally_distributed_dates(
+    train_dates: pd.Index,
+    sample_count: int,
+) -> pd.Index:
+    if sample_count <= 0:
+        raise ValueError("sample_count must be strictly positive.")
+    if sample_count >= len(train_dates):
+        return train_dates
+    sampled_positions = np.linspace(
+        0,
+        len(train_dates) - 1,
+        num=sample_count,
+        dtype=np.int64,
+    )
+    unique_positions = np.unique(sampled_positions)
+    return pd.Index(train_dates.take(unique_positions))
+
+
 def subsample_train_feature_selection_metadata(
     metadata: FeatureSelectionMetadata,
     *,
@@ -300,7 +324,7 @@ def subsample_train_feature_selection_metadata(
     sampled_date_count = min(len(train_dates), sampled_date_count)
     if sampled_date_count >= len(train_dates):
         return metadata
-    sampled_dates = pd.Index(train_dates[:sampled_date_count])
+    sampled_dates = _select_temporally_distributed_dates(train_dates, sampled_date_count)
     sampled_mask = cast(pd.Series, train_frame[DATE_COLUMN]).isin(sampled_dates)
     sampled_train_row_indices = metadata.train_row_indices[np.flatnonzero(sampled_mask.to_numpy())]
     LOGGER.info(
@@ -401,7 +425,9 @@ def discover_selection_feature_columns(
     feature_names = [
         str(field.name)
         for field in schema_info.fields
-        if not is_excluded_feature_column(field.name) and _is_numeric_schema_field(field)
+        if not is_excluded_feature_column(field.name)
+        and not is_temporarily_disabled_alpha_feature_column(field.name)
+        and _is_numeric_schema_field(field)
     ]
     return sorted(feature_names)
 
@@ -451,8 +477,12 @@ def build_selected_feature_dataset(
         for source_column in retained_context_map.keys()
         if source_column not in selected_feature_name_set
     ]
-    ordered_columns = _deduplicate_preserving_order(
-        [*protected_columns, *non_overlapping_context_columns, *selected_feature_names],
+    ordered_columns = _insert_ticker_after_date_if_needed(
+        _deduplicate_preserving_order(
+            [*protected_columns, *non_overlapping_context_columns, *selected_feature_names],
+        ),
+        available_columns=available_columns,
+        selected_feature_name_set=selected_feature_name_set,
     )
     data = pd.read_parquet(dataset_path, columns=ordered_columns)
     prepared = pd.DataFrame(data.copy())
@@ -503,8 +533,12 @@ def build_selected_feature_dataset_from_frame(
         for source_column in retained_context_map.keys()
         if source_column not in selected_feature_name_set
     ]
-    ordered_columns = _deduplicate_preserving_order(
-        [*protected_columns, *non_overlapping_context_columns, *selected_feature_names],
+    ordered_columns = _insert_ticker_after_date_if_needed(
+        _deduplicate_preserving_order(
+            [*protected_columns, *non_overlapping_context_columns, *selected_feature_names],
+        ),
+        available_columns=available_columns,
+        selected_feature_name_set=selected_feature_name_set,
     )
     prepared = pd.DataFrame(dataset.loc[:, ordered_columns].copy())
     prepared[DATE_COLUMN] = pd.to_datetime(prepared[DATE_COLUMN])
@@ -535,6 +569,28 @@ def _deduplicate_preserving_order(column_names: list[str]) -> list[str]:
         seen.add(column_name)
         unique_columns.append(column_name)
     return unique_columns
+
+
+def _insert_ticker_after_date_if_needed(
+    ordered_columns: list[str],
+    *,
+    available_columns: set[str],
+    selected_feature_name_set: set[str],
+) -> list[str]:
+    if (
+        TICKER_COLUMN not in available_columns
+        or TICKER_COLUMN in ordered_columns
+        or TICKER_COLUMN in selected_feature_name_set
+    ):
+        return ordered_columns
+    if DATE_COLUMN in ordered_columns:
+        inserted: list[str] = []
+        for column_name in ordered_columns:
+            inserted.append(column_name)
+            if column_name == DATE_COLUMN:
+                inserted.append(TICKER_COLUMN)
+        return inserted
+    return [TICKER_COLUMN, *ordered_columns]
 
 
 def save_feature_selection_outputs(
@@ -635,6 +691,7 @@ __all__ = [
     "load_feature_selection_metadata",
     "load_preprocessed_feature_selection_dataset",
     "load_sampled_train_feature_selection_dataset",
+    "read_parquet_column_names",
     "save_feature_selection_input_inventory",
     "save_feature_selection_outputs",
     "subsample_train_feature_selection_metadata",

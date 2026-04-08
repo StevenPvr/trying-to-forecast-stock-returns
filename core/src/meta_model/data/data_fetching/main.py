@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Orchestrator for all data-fetching sub-pipelines (prices, macro, cross-asset, sentiment, calendar)."""
+
 import logging
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed

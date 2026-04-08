@@ -19,11 +19,14 @@ from core.src.meta_model.feature_selection.grouping import build_feature_buckets
 from core.src.meta_model.feature_selection.scoring import BacktestFeatureSubsetScorer
 from core.src.meta_model.feature_selection.sfi import build_sfi_score_frame
 
+"""End-to-end robust feature selection: SFI → pruning → wrapper search → cap at top-N."""
+
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class RobustFeatureSelectionResult:
+    """Immutable result bundle from the full selection pipeline."""
     score_frame: pd.DataFrame
     selected_feature_names: list[str]
     group_manifest: pd.DataFrame
@@ -148,25 +151,8 @@ def build_final_candidate_feature_names(
     *,
     max_selected_features: int | None = None,
 ) -> list[str]:
-    """Ordered unique names: target-filter survivors plus rescued broker features."""
-    target_survivor_set = set(target_survivors)
-    broker_bypass_frame = cast(
-        pd.DataFrame,
-        sfi_scores.loc[
-            (cast(pd.Series, sfi_scores["feature_family"]).astype(str) == "broker")
-            & cast(pd.Series, sfi_scores["passes_coverage"]).astype(bool)
-            & ~cast(pd.Series, sfi_scores["feature_name"]).isin(target_survivor_set),
-        ].copy(),
-    )
-    broker_bypass_names = [
-        str(feature_name)
-        for feature_name in cast(pd.Series, broker_bypass_frame.sort_values(
-            ["objective_score", "daily_rank_ic_mean", "coverage_fraction", "feature_name"],
-            ascending=[False, False, False, True],
-        )["feature_name"]).tolist()
-    ]
-    ordered_names = [*target_survivors, *broker_bypass_names]
-    deduplicated_names = list(dict.fromkeys(ordered_names))
+    del sfi_scores
+    deduplicated_names = list(dict.fromkeys(target_survivors))
     if max_selected_features is None:
         return deduplicated_names
     if max_selected_features <= 0:

@@ -17,15 +17,15 @@ def add_path_features(data: pd.DataFrame, context: PriceContext) -> None:
     agreement = (gap_sign == intraday_sign) & gap_sign.ne(0.0) & intraday_sign.ne(0.0)
     reversal = (gap_sign != intraday_sign) & gap_sign.ne(0.0) & intraday_sign.ne(0.0)
 
-    data["deep_path_sign_flip_rate_21d"] = sign_flip.astype(float).rolling(21).mean()
-    data["deep_path_gap_intraday_agreement_rate_21d"] = agreement.astype(float).rolling(21).mean()
-    data["deep_path_gap_intraday_reversal_rate_21d"] = reversal.astype(float).rolling(21).mean()
-    data["deep_path_close_near_high_rate_21d"] = context.close_location.gt(0.6).astype(float).rolling(21).mean()
-    data["deep_path_close_near_low_rate_21d"] = context.close_location.lt(-0.6).astype(float).rolling(21).mean()
-    data["deep_path_positive_tail_share_21d"] = context.returns_1d.gt(context.return_std_21d).astype(float).rolling(21).mean()
-    data["deep_path_negative_tail_share_21d"] = context.returns_1d.lt(-context.return_std_21d).astype(float).rolling(21).mean()
+    data["deep_path_sign_flip_rate_21d"] = sign_flip.astype(float).rolling(21, min_periods=21).mean()
+    data["deep_path_gap_intraday_agreement_rate_21d"] = agreement.astype(float).rolling(21, min_periods=21).mean()
+    data["deep_path_gap_intraday_reversal_rate_21d"] = reversal.astype(float).rolling(21, min_periods=21).mean()
+    data["deep_path_close_near_high_rate_21d"] = context.close_location.gt(0.6).astype(float).rolling(21, min_periods=21).mean()
+    data["deep_path_close_near_low_rate_21d"] = context.close_location.lt(-0.6).astype(float).rolling(21, min_periods=21).mean()
+    data["deep_path_positive_tail_share_21d"] = context.returns_1d.gt(context.return_std_21d).astype(float).rolling(21, min_periods=21).mean()
+    data["deep_path_negative_tail_share_21d"] = context.returns_1d.lt(-context.return_std_21d).astype(float).rolling(21, min_periods=21).mean()
     data["deep_state_return_autocorr_sign_21d"] = as_series(
-        return_sign.rolling(21).corr(prev_return_sign),
+        return_sign.rolling(21, min_periods=21).corr(prev_return_sign),
         context.index,
     )
 

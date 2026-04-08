@@ -9,6 +9,8 @@ import pandas as pd
 from core.src.meta_model.feature_selection.io import FeatureSelectionMetadata
 from core.src.meta_model.model_contract import DATE_COLUMN
 
+"""Temporal cross-validation fold construction for feature selection."""
+
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Single-Feature Importance (SFI): score each feature individually via proxy backtest."""
+
 from dataclasses import replace
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
@@ -15,7 +17,10 @@ from core.src.meta_model.feature_selection.config import FeatureSelectionConfig
 from core.src.meta_model.feature_selection.cv import SelectionFold
 from core.src.meta_model.feature_selection.grouping import infer_feature_family, normalize_feature_stem
 from core.src.meta_model.feature_selection.io import FeatureSelectionMetadata
-from core.src.meta_model.feature_selection.objective import SubsetEconomicScore
+from core.src.meta_model.feature_selection.objective import (
+    SubsetEconomicScore,
+    passes_sfi_gates,
+)
 from core.src.meta_model.feature_selection.scoring import BacktestFeatureSubsetScorer
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -255,8 +260,8 @@ def _score_single_feature(
     coverage_fraction = cache.feature_coverage_fraction(feature_name)
     subset_score = scorer([feature_name]) if coverage_fraction > 0.0 else _empty_subset_score(feature_name)
     passes_coverage = coverage_fraction >= config.sfi_min_coverage_fraction
-    passes_sfi = passes_coverage and subset_score.objective_score > 0.0
-    drop_reason = _resolve_sfi_drop_reason(passes_coverage, subset_score)
+    passes_sfi = passes_coverage and passes_sfi_gates(subset_score, config)
+    drop_reason = _resolve_sfi_drop_reason(passes_coverage, subset_score, config)
     return {
         "feature_name": feature_name,
         "feature_family": infer_feature_family(feature_name),
@@ -295,11 +300,14 @@ def _empty_subset_score(feature_name: str) -> SubsetEconomicScore:
 def _resolve_sfi_drop_reason(
     passes_coverage: bool,
     subset_score: SubsetEconomicScore,
+    config: FeatureSelectionConfig,
 ) -> str:
     if not passes_coverage:
         return "low_coverage"
     if subset_score.objective_score <= 0.0:
         return "non_positive_sfi"
+    if not passes_sfi_gates(subset_score, config):
+        return "failed_selection_gates"
     return "retained"
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""XGBoost and Optuna lazy-loading and hyper-parameter search-space definition."""
+
 import importlib
 import importlib.util
 from typing import Any, Protocol

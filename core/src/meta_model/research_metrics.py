@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Research-grade signal diagnostics: daily Rank IC, Linear IC, top/bottom spread."""
+
 import math
 from typing import cast
 
@@ -30,6 +32,7 @@ def compute_mean_daily_spearman_ic(
     targets: np.ndarray,
     dates: np.ndarray,
 ) -> float:
+    """Compute the mean daily Spearman rank IC across cross-sections."""
     frame = pd.DataFrame({
         DATE_COLUMN: pd.to_datetime(dates),
         PREDICTION_COLUMN: predictions,
@@ -58,6 +61,7 @@ def build_daily_signal_diagnostics(
     realized_return_column: str = REALIZED_RETURN_COLUMN,
     top_fraction: float = 0.01,
 ) -> pd.DataFrame:
+    """Build a per-day DataFrame of rank IC, linear IC, and long/short spread."""
     rows: list[dict[str, float | pd.Timestamp]] = []
     ordered = predictions.sort_values([DATE_COLUMN, PREDICTION_COLUMN]).reset_index(drop=True)
     for current_date, group in ordered.groupby(DATE_COLUMN, sort=False):
@@ -95,6 +99,7 @@ def build_daily_signal_diagnostics(
 
 
 def summarize_daily_signal_diagnostics(daily_diagnostics: pd.DataFrame) -> dict[str, float]:
+    """Aggregate daily diagnostics into a summary dict (mean IC, IR, spread)."""
     if daily_diagnostics.empty:
         return {
             "daily_rank_ic_mean": 0.0,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Feature-engineering I/O: chunked Parquet reads, lagged feature writes, and dataset assembly."""
+
 import logging
 from pathlib import Path
 from typing import Iterable

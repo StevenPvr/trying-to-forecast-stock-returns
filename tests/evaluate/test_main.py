@@ -31,44 +31,36 @@ from core.src.meta_model.evaluate.main import _select_evaluate_model_specs
 from core.src.meta_model.evaluate.parameters import load_selected_xgboost_configuration
 from core.src.meta_model.evaluate.training import build_available_training_frame, predict_test_frame
 from core.src.meta_model.evaluate.training import resolve_training_threads
-from core.src.meta_model.model_registry.main import ModelSpec
 from core.src.meta_model.model_contract import REALIZED_RETURN_COLUMN
+from core.src.meta_model.model_registry.main import ModelSpec
 
 
 def _ts(value: str) -> pd.Timestamp:
     return cast(pd.Timestamp, pd.Timestamp(value))
 
 
-def _build_test_cost_config() -> XtbCostConfig:
+def _build_test_cost_config(*, account_currency: str = "EUR") -> XtbCostConfig:
     provider = BrokerSpecProvider(
         specs=(
             XtbInstrumentSpec(
                 symbol="__default_stock__",
-                instrument_group="stock_cfd",
+                instrument_group="stock_cash",
                 currency="USD",
-                spread_bps=20.0,
-                slippage_bps=5.0,
+                spread_bps=0.0,
+                slippage_bps=0.0,
                 long_swap_bps_daily=0.0,
                 short_swap_bps_daily=0.0,
-                margin_requirement=0.20,
+                margin_requirement=1.0,
                 max_adv_participation=0.05,
                 effective_from="2000-01-01",
-            ),
-            XtbInstrumentSpec(
-                symbol="__default_index__",
-                instrument_group="index_cfd",
-                currency="USD",
-                spread_bps=8.0,
-                slippage_bps=2.0,
-                long_swap_bps_daily=0.0,
-                short_swap_bps_daily=0.0,
-                margin_requirement=0.05,
-                max_adv_participation=0.20,
-                effective_from="2000-01-01",
+                fx_conversion_bps=0.0,
             ),
         ),
     )
-    return XtbCostConfig(fx_conversion_bps=0.0, broker_spec_provider=provider)
+    return XtbCostConfig(
+        account_currency=account_currency,
+        broker_spec_provider=provider,
+    )
 
 
 class _FakeBooster:
@@ -76,7 +68,7 @@ class _FakeBooster:
         return [0.25]
 
 
-def test_build_daily_signal_candidates_selects_top_and_bottom_one_percent() -> None:
+def test_build_daily_signal_candidates_keeps_only_top_longs_for_cash_equities() -> None:
     rows = [
         {"date": pd.Timestamp("2022-01-03"), "ticker": f"T{i:03d}", "prediction": float(i)}
         for i in range(100)
@@ -87,26 +79,7 @@ def test_build_daily_signal_candidates_selects_top_and_bottom_one_percent() -> N
         scores,
         top_fraction=0.01,
         cost_config=XtbCostConfig(),
-        expected_holding_days=0,
-    )
-
-    assert len(candidates) == 2
-    assert {candidate.ticker for candidate in candidates} == {"T000", "T099"}
-    assert {candidate.side for candidate in candidates} == {"long", "short"}
-
-
-def test_build_daily_signal_candidates_long_only_keeps_top_longs() -> None:
-    rows = [
-        {"date": pd.Timestamp("2022-01-03"), "ticker": f"T{i:03d}", "prediction": float(i)}
-        for i in range(100)
-    ]
-    scores = pd.DataFrame(rows)
-
-    candidates = build_daily_signal_candidates(
-        scores,
-        top_fraction=0.01,
-        cost_config=XtbCostConfig(),
-        expected_holding_days=0,
+        expected_holding_days=1,
         neutrality_mode="long_only",
     )
 
@@ -127,39 +100,17 @@ def test_select_evaluate_model_specs_keeps_only_xgboost() -> None:
     assert [model_spec.model_name for model_spec in selected_specs] == ["xgboost"]
 
 
-def test_validate_backtest_config_rejects_invalid_realism_requirements() -> None:
+def test_validate_backtest_config_rejects_invalid_cash_requirements() -> None:
     with pytest.raises(ValueError, match="execution_lag_days"):
-        validate_backtest_config(
-            BacktestConfig(
-                execution_lag_days=-1,
-                benchmark_mode="universe_equal_weight",
-                neutrality_mode="sector_beta_neutral",
-            ),
-        )
+        validate_backtest_config(BacktestConfig(execution_lag_days=-1))
 
-    validate_backtest_config(
-        BacktestConfig(
-            execution_lag_days=0,
-            benchmark_mode="universe_equal_weight",
-            neutrality_mode="sector_beta_neutral",
-        ),
-    )
+    with pytest.raises(ValueError, match="neutrality_mode must remain long_only"):
+        validate_backtest_config(BacktestConfig(neutrality_mode="sector_neutral"))
 
-    with pytest.raises(ValueError, match="benchmark_mode"):
-        validate_backtest_config(
-            BacktestConfig(
-                benchmark_mode="",
-                neutrality_mode="sector_beta_neutral",
-            ),
-        )
+    with pytest.raises(ValueError, match="starting_cash_eur"):
+        validate_backtest_config(BacktestConfig(starting_cash_eur=0.0))
 
-    with pytest.raises(ValueError, match="neutrality_mode"):
-        validate_backtest_config(
-            BacktestConfig(
-                benchmark_mode="universe_equal_weight",
-                neutrality_mode="",
-            ),
-        )
+    validate_backtest_config(BacktestConfig())
 
 
 def test_predict_test_frame_keeps_signal_date_before_execution_date() -> None:
@@ -200,7 +151,7 @@ def test_resolve_training_threads_uses_all_detected_cores(
     assert resolve_training_threads() == 10
 
 
-def test_allocate_signal_candidates_caps_symbol_exposure_at_five_percent() -> None:
+def test_allocate_signal_candidates_respects_symbol_cap_cash_and_minimum_order() -> None:
     active_trades = [
         ActiveTrade(
             ticker="AAA",
@@ -211,17 +162,19 @@ def test_allocate_signal_candidates_caps_symbol_exposure_at_five_percent() -> No
             predicted_return=0.03,
             realized_log_return=0.0,
             signal_rank=1,
+            spec=_build_test_cost_config().broker_spec_provider.resolve("AAA", _ts("2022-01-03")),
         ),
     ]
     signal_rows = pd.DataFrame([
         {"date": pd.Timestamp("2022-01-04"), "ticker": "AAA", "prediction": 0.04},
-        {"date": pd.Timestamp("2022-01-04"), "ticker": "BBB", "prediction": -0.05},
+        {"date": pd.Timestamp("2022-01-04"), "ticker": "BBB", "prediction": 0.05},
     ])
     candidates = build_daily_signal_candidates(
         signal_rows,
         top_fraction=0.5,
-        cost_config=XtbCostConfig(),
-        expected_holding_days=0,
+        cost_config=_build_test_cost_config(),
+        expected_holding_days=1,
+        neutrality_mode="long_only",
     )
 
     new_trades = allocate_signal_candidates(
@@ -229,161 +182,104 @@ def test_allocate_signal_candidates_caps_symbol_exposure_at_five_percent() -> No
         candidates=candidates,
         active_trades=active_trades,
         current_equity=1_000_000.0,
+        cash_balance=6_000.0,
         hold_period_days=5,
         allocation_fraction=0.05,
         action_cap_fraction=0.05,
         gross_cap_fraction=1.0,
         adv_participation_limit=0.05,
-        neutrality_mode="dollar_neutral",
+        neutrality_mode="long_only",
         open_hurdle_bps=0.0,
         apply_prediction_hurdle=False,
         unique_dates=pd.Index(pd.date_range("2022-01-03", periods=10, freq="B")),
+        month_to_date_turnover_eur=0.0,
+        account_currency="EUR",
     )
 
-    aaa_trade = next(trade for trade in new_trades if trade.ticker == "AAA")
-    assert aaa_trade.notional == 5_000.0
-    assert abs(sum(trade.notional for trade in active_trades + [aaa_trade]) - 50_000.0) < 1e-9
+    assert len(new_trades) == 1
+    assert new_trades[0].ticker == "BBB"
+    assert new_trades[0].notional == pytest.approx(6_000.0)
 
 
-def test_allocate_signal_candidates_respects_adv_cap_and_sector_neutrality() -> None:
-    candidates = [
-        build_daily_signal_candidates(
-            pd.DataFrame([
-                {
-                    "date": _ts("2022-01-04"),
-                    "ticker": "AAA",
-                    "prediction": 0.8,
-                    "company_sector": "Tech",
-                    "company_beta": 1.2,
-                    "stock_open_price": 100.0,
-                    "stock_trading_volume": 1_000.0,
-                    REALIZED_RETURN_COLUMN: 0.02,
-                },
-                {
-                    "date": _ts("2022-01-04"),
-                    "ticker": "BBB",
-                    "prediction": 0.7,
-                    "company_sector": "Health",
-                    "company_beta": 0.9,
-                    "stock_open_price": 100.0,
-                    "stock_trading_volume": 50_000.0,
-                    REALIZED_RETURN_COLUMN: 0.02,
-                },
-                {
-                    "date": _ts("2022-01-04"),
-                    "ticker": "CCC",
-                    "prediction": -0.7,
-                    "company_sector": "Tech",
-                    "company_beta": 1.1,
-                    "stock_open_price": 100.0,
-                    "stock_trading_volume": 50_000.0,
-                    REALIZED_RETURN_COLUMN: -0.02,
-                },
-                {
-                    "date": _ts("2022-01-04"),
-                    "ticker": "DDD",
-                    "prediction": -0.8,
-                    "company_sector": "Energy",
-                    "company_beta": 1.3,
-                    "stock_open_price": 100.0,
-                    "stock_trading_volume": 50_000.0,
-                    REALIZED_RETURN_COLUMN: -0.02,
-                },
-            ]),
-            top_fraction=0.5,
-            cost_config=XtbCostConfig(),
-            expected_holding_days=0,
-        )
-    ][0]
-
-    new_trades = allocate_signal_candidates(
-        trade_date=_ts("2022-01-04"),
-        candidates=candidates,
-        active_trades=[],
-        current_equity=1_000_000.0,
-        hold_period_days=5,
-        allocation_fraction=0.05,
-        action_cap_fraction=0.05,
-        gross_cap_fraction=1.0,
-        adv_participation_limit=0.05,
-        neutrality_mode="sector_neutral",
-        open_hurdle_bps=0.0,
-        apply_prediction_hurdle=False,
-        unique_dates=pd.Index(pd.date_range("2022-01-03", periods=10, freq="B")),
+def test_allocate_signal_candidates_can_disable_prediction_hurdle_for_rank_scores() -> None:
+    provider = BrokerSpecProvider(
+        specs=(
+            XtbInstrumentSpec(
+                symbol="__default_stock__",
+                instrument_group="stock_cash",
+                currency="USD",
+                spread_bps=0.0,
+                slippage_bps=0.0,
+                long_swap_bps_daily=0.0,
+                short_swap_bps_daily=0.0,
+                margin_requirement=1.0,
+                max_adv_participation=0.05,
+                effective_from="2000-01-01",
+                fx_conversion_bps=50.0,
+            ),
+        ),
     )
-
-    assert {trade.ticker for trade in new_trades} == {"AAA", "CCC"}
-    aaa_trade = next(trade for trade in new_trades if trade.ticker == "AAA")
-    ccc_trade = next(trade for trade in new_trades if trade.ticker == "CCC")
-    assert aaa_trade.notional == 5_000.0
-    assert ccc_trade.notional == 50_000.0
-
-
-def test_allocate_signal_candidates_can_disable_prediction_magnitude_hurdle_for_rank_scores() -> None:
+    cost_config = XtbCostConfig(account_currency="EUR", broker_spec_provider=provider)
     candidates = build_daily_signal_candidates(
         pd.DataFrame([
             {
                 "date": _ts("2022-01-04"),
                 "ticker": "AAA",
-                "prediction": 0.0015,
-                "company_sector": "Tech",
-                "company_beta": 1.0,
+                "prediction": 0.001,
                 "stock_open_price": 100.0,
                 "stock_trading_volume": 1_000_000.0,
                 REALIZED_RETURN_COLUMN: 0.02,
             },
-            {
-                "date": _ts("2022-01-04"),
-                "ticker": "BBB",
-                "prediction": -0.0015,
-                "company_sector": "Tech",
-                "company_beta": 1.0,
-                "stock_open_price": 100.0,
-                "stock_trading_volume": 1_000_000.0,
-                REALIZED_RETURN_COLUMN: -0.02,
-            },
         ]),
-        top_fraction=0.5,
-        cost_config=_build_test_cost_config(),
-        expected_holding_days=0,
+        top_fraction=1.0,
+        cost_config=cost_config,
+        expected_holding_days=1,
+        neutrality_mode="long_only",
     )
 
     blocked_trades = allocate_signal_candidates(
         trade_date=_ts("2022-01-04"),
         candidates=candidates,
         active_trades=[],
-        current_equity=1_000_000.0,
-        hold_period_days=0,
+        current_equity=100_000.0,
+        cash_balance=100_000.0,
+        hold_period_days=1,
         allocation_fraction=0.05,
         action_cap_fraction=0.05,
         gross_cap_fraction=1.0,
         adv_participation_limit=0.05,
-        neutrality_mode="dollar_neutral",
+        neutrality_mode="long_only",
         open_hurdle_bps=12.0,
         apply_prediction_hurdle=True,
-        unique_dates=pd.Index(pd.date_range("2022-01-04", periods=1, freq="B")),
+        unique_dates=pd.Index(pd.date_range("2022-01-04", periods=2, freq="B")),
+        month_to_date_turnover_eur=100_000.0,
+        account_currency="EUR",
     )
     allowed_trades = allocate_signal_candidates(
         trade_date=_ts("2022-01-04"),
         candidates=candidates,
         active_trades=[],
-        current_equity=1_000_000.0,
-        hold_period_days=0,
+        current_equity=100_000.0,
+        cash_balance=100_000.0,
+        hold_period_days=1,
         allocation_fraction=0.05,
         action_cap_fraction=0.05,
         gross_cap_fraction=1.0,
         adv_participation_limit=0.05,
-        neutrality_mode="dollar_neutral",
+        neutrality_mode="long_only",
         open_hurdle_bps=12.0,
         apply_prediction_hurdle=False,
-        unique_dates=pd.Index(pd.date_range("2022-01-04", periods=1, freq="B")),
+        unique_dates=pd.Index(pd.date_range("2022-01-04", periods=2, freq="B")),
+        month_to_date_turnover_eur=100_000.0,
+        account_currency="EUR",
     )
 
     assert blocked_trades == []
-    assert len(allowed_trades) == 2
+    assert len(allowed_trades) == 1
 
 
-def test_finalize_trade_applies_xtb_transaction_and_financing_costs() -> None:
+def test_finalize_trade_applies_cash_equity_entry_and_exit_costs() -> None:
+    spec = _build_test_cost_config().broker_spec_provider.resolve("AAA", _ts("2022-01-03"))
     trade = ActiveTrade(
         ticker="AAA",
         side="long",
@@ -393,56 +289,52 @@ def test_finalize_trade_applies_xtb_transaction_and_financing_costs() -> None:
         predicted_return=0.03,
         realized_log_return=0.09531017980432493,
         signal_rank=1,
+        spec=spec,
         entry_transaction_cost_amount=100.0,
-        accumulated_financing_cost_amount=25.0,
-        expected_exit_cost_rate=0.002,
-        expected_financing_cost_rate=0.0005,
+        entry_commission_amount=100.0,
+        entry_fx_conversion_amount=0.0,
+        expected_entry_cost_rate=0.002,
     )
 
     closed = finalize_trade(
         trade,
-        cost_config=XtbCostConfig(),
+        exit_cost_estimate=SimpleNamespace(
+            total_cost_amount_eur=100.0,
+            commission_amount_eur=100.0,
+            fx_conversion_amount_eur=0.0,
+        ),
     )
 
     assert round(closed.gross_return, 6) == 0.10
     assert round(closed.transaction_cost, 6) == 0.004
-    assert round(closed.financing_cost, 6) == 0.0005
-    assert round(closed.net_return, 6) == 0.0955
-    assert round(closed.exit_cash_flow_amount, 6) == 4900.0
+    assert round(closed.net_return, 6) == 0.096
+    assert round(closed.exit_cash_flow_amount, 6) == 54900.0
 
 
-def test_finalize_trade_exposes_trade_cashflow_breakdown() -> None:
-    trade = ActiveTrade(
-        ticker="AAA",
-        side="long",
-        entry_date=_ts("2022-01-03"),
-        exit_date=_ts("2022-01-03"),
-        notional=50_000.0,
-        predicted_return=0.03,
-        realized_log_return=0.09531017980432493,
-        signal_rank=1,
-        entry_transaction_cost_amount=75.0,
-        accumulated_financing_cost_amount=10.0,
-        expected_exit_cost_rate=0.0015,
+def test_process_prediction_day_tracks_cash_and_monthly_turnover() -> None:
+    provider = BrokerSpecProvider(
+        specs=(
+            XtbInstrumentSpec(
+                symbol="__default_stock__",
+                instrument_group="stock_cash",
+                currency="EUR",
+                spread_bps=0.0,
+                slippage_bps=0.0,
+                long_swap_bps_daily=0.0,
+                short_swap_bps_daily=0.0,
+                margin_requirement=1.0,
+                max_adv_participation=0.05,
+                effective_from="2000-01-01",
+                fx_conversion_bps=0.0,
+            ),
+        ),
     )
-
-    closed = finalize_trade(
-        trade,
-        cost_config=_build_test_cost_config(),
+    cost_config = XtbCostConfig(account_currency="EUR", broker_spec_provider=provider)
+    state = BacktestState(
+        initial_equity=100_000.0,
+        current_equity=100_000.0,
+        cash_balance=100_000.0,
     )
-
-    assert closed.gross_pnl_amount == pytest.approx(5_000.0)
-    assert closed.entry_transaction_cost_amount == pytest.approx(75.0)
-    assert closed.exit_transaction_cost_amount == pytest.approx(75.0)
-    assert closed.total_transaction_cost_amount == pytest.approx(150.0)
-    assert closed.financing_cost_amount == pytest.approx(10.0)
-    assert closed.net_pnl_amount == pytest.approx(4_840.0)
-    assert closed.pnl_amount == pytest.approx(4_840.0)
-    assert closed.exit_cash_flow_amount == pytest.approx(4_925.0)
-
-
-def test_process_prediction_day_records_daily_reconciliation_breakdown() -> None:
-    state = BacktestState(initial_equity=1_000_000.0, current_equity=1_000_000.0)
     daily_predictions = pd.DataFrame([
         {
             "date": _ts("2022-01-03"),
@@ -452,46 +344,32 @@ def test_process_prediction_day_records_daily_reconciliation_breakdown() -> None
             "stock_trading_volume": 1_000_000.0,
             REALIZED_RETURN_COLUMN: 0.09531017980432493,
         },
-        {
-            "date": _ts("2022-01-03"),
-            "ticker": "BBB",
-            "prediction": -0.9,
-            "stock_open_price": 100.0,
-            "stock_trading_volume": 1_000_000.0,
-            REALIZED_RETURN_COLUMN: -0.10536051565782628,
-        },
     ])
+    unique_dates = pd.Index([_ts("2022-01-03"), _ts("2022-01-04")])
 
     process_prediction_day(
         state=state,
         daily_predictions=daily_predictions,
-        unique_dates=pd.Index([_ts("2022-01-03")]),
-        top_fraction=0.5,
+        unique_dates=unique_dates,
+        top_fraction=1.0,
         allocation_fraction=0.05,
         action_cap_fraction=0.05,
         gross_cap_fraction=1.0,
         adv_participation_limit=0.05,
-        neutrality_mode="dollar_neutral",
+        neutrality_mode="long_only",
         open_hurdle_bps=0.0,
         apply_prediction_hurdle=False,
-        hold_period_days=0,
-        cost_config=_build_test_cost_config(),
+        hold_period_days=1,
+        cost_config=cost_config,
     )
 
     daily_row = state.daily_rows[0]
-
-    assert len(state.closed_trades) == 2
-    assert state.current_equity == pytest.approx(1_009_700.0)
-    assert daily_row["starting_equity"] == pytest.approx(1_000_000.0)
-    assert daily_row["gross_pnl_exits"] == pytest.approx(10_000.0)
-    assert daily_row["entry_cost_amount"] == pytest.approx(150.0)
-    assert daily_row["exit_cost_amount"] == pytest.approx(150.0)
-    assert daily_row["financing_amount"] == pytest.approx(0.0)
-    assert daily_row["net_cash_flow"] == pytest.approx(9_700.0)
-    assert daily_row["ending_equity"] == pytest.approx(1_009_700.0)
-    assert daily_row["opened_notional"] == pytest.approx(100_000.0)
-    assert daily_row["closed_notional"] == pytest.approx(100_000.0)
-    assert daily_row["active_notional_end"] == pytest.approx(0.0)
+    assert daily_row["opened_notional"] == pytest.approx(5_000.0)
+    assert daily_row["entry_cost_amount"] == pytest.approx(0.0)
+    assert daily_row["cash_balance"] == pytest.approx(95_000.0)
+    assert daily_row["active_notional_end"] == pytest.approx(5_000.0)
+    assert daily_row["month_to_date_turnover_eur"] == pytest.approx(5_000.0)
+    assert state.current_equity == pytest.approx(100_000.0)
 
 
 def test_load_selected_xgboost_configuration_prefers_best_trial(
@@ -567,79 +445,51 @@ def test_build_available_training_frame_uses_only_labels_realized_by_prediction_
     assert _ts("2022-01-11") not in set(cast(pd.Series, training_frame["date"]).tolist())
 
 
-def test_process_prediction_day_updates_daily_equity_immediately() -> None:
-    state = BacktestState()
-    day_one_predictions = pd.DataFrame([
-        {"date": _ts("2022-01-03"), "ticker": f"L{i}", "prediction": float(100 + i), REALIZED_RETURN_COLUMN: 0.13976194237515863, "company_sector": "Tech", "company_beta": 1.0, "stock_open_price": 100.0, "stock_trading_volume": 50_000.0}
-        for i in range(50)
-    ] + [
-        {"date": _ts("2022-01-03"), "ticker": f"S{i}", "prediction": float(i), REALIZED_RETURN_COLUMN: -0.13976194237515863, "company_sector": "Tech", "company_beta": 1.0, "stock_open_price": 100.0, "stock_trading_volume": 50_000.0}
-        for i in range(50)
-    ])
-    day_two_predictions = pd.DataFrame([
-        {"date": _ts("2022-01-10"), "ticker": f"L{i}", "prediction": float(100 + i), REALIZED_RETURN_COLUMN: 0.13976194237515863, "company_sector": "Tech", "company_beta": 1.0, "stock_open_price": 100.0, "stock_trading_volume": 50_000.0}
-        for i in range(50)
-    ] + [
-        {"date": _ts("2022-01-10"), "ticker": f"S{i}", "prediction": float(i), REALIZED_RETURN_COLUMN: -0.13976194237515863, "company_sector": "Tech", "company_beta": 1.0, "stock_open_price": 100.0, "stock_trading_volume": 50_000.0}
-        for i in range(50)
-    ])
-    unique_dates = pd.Index(
-        cast(
-            pd.Series,
-            pd.to_datetime(pd.Series([_ts("2022-01-03"), _ts("2022-01-10")])),
-        ).sort_values(),
+def test_finalize_backtest_state_reports_cash_equity_metrics() -> None:
+    state = BacktestState(
+        initial_equity=100_000.0,
+        current_equity=101_000.0,
+        cash_balance=101_000.0,
+        daily_rows=[
+            {
+                "date": _ts("2022-01-03"),
+                "equity": 100_500.0,
+                "realized_return": 0.005,
+                "benchmark_return": 0.001,
+                "gross_pnl_exits": 600.0,
+                "entry_cost_amount": 50.0,
+                "exit_cost_amount": 25.0,
+                "custody_fee_amount": 0.0,
+                "turnover": 0.05,
+                "gross_exposure": 0.05,
+                "capacity_binding_share": 0.0,
+                "reconciliation_error": 0.0,
+            },
+            {
+                "date": _ts("2022-01-04"),
+                "equity": 101_000.0,
+                "realized_return": 0.004975124378109453,
+                "benchmark_return": 0.001,
+                "gross_pnl_exits": 500.0,
+                "entry_cost_amount": 50.0,
+                "exit_cost_amount": 25.0,
+                "custody_fee_amount": 0.0,
+                "turnover": 0.05,
+                "gross_exposure": 0.04,
+                "capacity_binding_share": 0.0,
+                "reconciliation_error": 0.0,
+            },
+        ],
     )
 
-    process_prediction_day(
-        state=state,
-        daily_predictions=day_one_predictions,
-        unique_dates=unique_dates,
-        top_fraction=0.01,
-        allocation_fraction=0.05,
-        action_cap_fraction=0.05,
-        gross_cap_fraction=1.0,
-        adv_participation_limit=0.05,
-        neutrality_mode="sector_beta_neutral",
-        open_hurdle_bps=0.0,
-        apply_prediction_hurdle=False,
-        hold_period_days=1,
-        cost_config=XtbCostConfig(),
-        logger=None,
-    )
-    process_prediction_day(
-        state=state,
-        daily_predictions=day_two_predictions,
-        unique_dates=unique_dates,
-        top_fraction=0.01,
-        allocation_fraction=0.05,
-        action_cap_fraction=0.05,
-        gross_cap_fraction=1.0,
-        adv_participation_limit=0.05,
-        neutrality_mode="sector_beta_neutral",
-        open_hurdle_bps=0.0,
-        apply_prediction_hurdle=False,
-        hold_period_days=1,
-        cost_config=XtbCostConfig(),
-        logger=None,
-    )
     _, daily_frame, summary = finalize_backtest_state(state)
 
     assert len(daily_frame) == 2
-    assert float(daily_frame.iloc[0]["total_return"]) < 0.0
-    assert float(daily_frame.iloc[1]["total_return"]) > 0.0
-    assert summary["final_equity"] > 1.0
-    assert "benchmark_return" in daily_frame.columns
-    assert "turnover" in daily_frame.columns
-    assert "gross_exposure" in daily_frame.columns
-    assert "net_exposure" in daily_frame.columns
-    assert "alpha_over_benchmark_net" in summary
-    assert "turnover_annualized" in summary
-    assert "calmar_ratio" in summary
+    assert summary["final_equity"] == pytest.approx(101_000.0)
+    assert summary["transaction_cost_amount_total"] == pytest.approx(150.0)
     assert "capacity_binding_share" in summary
-    assert "margin_headroom" in summary
+    assert "average_gross_exposure" in summary
 
 
 if __name__ == "__main__":
-    import pytest
-
     pytest.main([__file__, "-v"])

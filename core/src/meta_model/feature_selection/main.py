@@ -27,6 +27,7 @@ from core.src.meta_model.feature_selection.io import (
     load_sampled_train_feature_selection_dataset,
     load_feature_selection_metadata,
     materialize_feature_selection_dataset,
+    read_parquet_column_names,
     save_feature_selection_outputs,
     subsample_train_feature_selection_metadata,
 )
@@ -34,13 +35,18 @@ from core.src.meta_model.feature_selection.reporting import (
     validate_filtered_dataset_matches_selection,
 )
 from core.src.meta_model.feature_selection.selection_pipeline import run_robust_feature_selection
-from core.src.meta_model.model_contract import LABEL_EMBARGO_DAYS, is_excluded_feature_column
+from core.src.meta_model.model_contract import (
+    LABEL_EMBARGO_DAYS,
+    is_excluded_feature_column,
+    merge_structural_feature_names_into_selected,
+)
+from core.src.meta_model.model_contract import is_temporarily_disabled_alpha_feature_column
+
+"""Feature selection orchestrator: load data, run SFI + pruning + search, save outputs."""
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 DEFAULT_RETAINED_CONTEXT_COLUMNS: dict[str, str] = {
-    "company_sector": "hl_context_company_sector",
-    "company_industry": "hl_context_company_industry",
     "stock_open_price": "hl_context_stock_open_price",
     "stock_high_price": "hl_context_stock_high_price",
     "stock_low_price": "hl_context_stock_low_price",
@@ -50,6 +56,7 @@ DEFAULT_RETAINED_CONTEXT_COLUMNS: dict[str, str] = {
 
 
 def build_selection_feature_columns(data: pd.DataFrame) -> list[str]:
+    """Return sorted numeric feature columns eligible for selection."""
     raw_column_names = cast(list[object], data.columns.tolist())
     column_names = [str(column_name) for column_name in raw_column_names]
     return sorted(
@@ -57,6 +64,7 @@ def build_selection_feature_columns(data: pd.DataFrame) -> list[str]:
             column_name
             for column_name in column_names
             if not is_excluded_feature_column(column_name)
+            and not is_temporarily_disabled_alpha_feature_column(column_name)
             and pd.api.types.is_numeric_dtype(data[column_name])
         ],
     )
@@ -69,6 +77,7 @@ def run_feature_selection(
     output_bundle: FeatureSelectionOutputBundle | None = None,
     retained_context_columns: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Run the full feature selection pipeline and return (score_frame, selected_frame, filtered_dataset)."""
     start_time = time.perf_counter()
     selection_config = config or FeatureSelectionConfig()
     resolved_output_bundle = output_bundle or build_default_feature_selection_output_bundle()
@@ -141,15 +150,19 @@ def run_feature_selection(
     if not selected_feature_names:
         raise RuntimeError(_build_selection_failure_message(selection_result.score_frame))
     score_frame = selection_result.score_frame
+    manifest_feature_names = merge_structural_feature_names_into_selected(
+        selected_feature_names,
+        available_columns=read_parquet_column_names(dataset_path),
+    )
     filtered_dataset = build_selected_feature_dataset(
         dataset_path,
-        selected_feature_names,
+        manifest_feature_names,
         retained_context_columns=resolved_retained_context_columns,
     )
-    validate_filtered_dataset_matches_selection(filtered_dataset, selected_feature_names)
+    validate_filtered_dataset_matches_selection(filtered_dataset, manifest_feature_names)
     save_feature_selection_outputs(
         score_frame,
-        selected_feature_names,
+        manifest_feature_names,
         filtered_dataset,
         output_bundle=resolved_output_bundle,
         input_inventory=input_inventory if selection_config.emit_input_inventory else None,
@@ -162,14 +175,14 @@ def run_feature_selection(
     )
     selected_frame = pd.DataFrame(
         {
-            "feature_name": selected_feature_names,
-            "selection_rank": np.arange(1, len(selected_feature_names) + 1, dtype=np.int64),
+            "feature_name": manifest_feature_names,
+            "selection_rank": np.arange(1, len(manifest_feature_names) + 1, dtype=np.int64),
         },
     )
     LOGGER.info(
         "Feature selection completed: input_features=%d | selected_features=%d | dataset_rows=%d | elapsed=%.2fs",
         len(feature_columns),
-        len(selected_feature_names),
+        len(manifest_feature_names),
         len(filtered_dataset),
         time.perf_counter() - start_time,
     )
@@ -194,6 +207,7 @@ def _build_selection_failure_message(score_frame: pd.DataFrame) -> str:
 
 
 def main() -> None:
+    """Entry point for the feature selection pipeline."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     run_feature_selection()
 

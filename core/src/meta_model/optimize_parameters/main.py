@@ -37,6 +37,7 @@ from core.src.meta_model.optimize_parameters.dataset import (
     OptimizationDatasetBundle,
     build_optimization_dataset_bundle,
     load_preprocessed_dataset,
+    optimization_feature_payload_bytes,
 )
 from core.src.meta_model.optimize_parameters.fold_matrix_cache import (
     CachedFoldMatrixBundle,
@@ -62,6 +63,7 @@ from core.src.meta_model.optimize_parameters.search_space import (
     suggest_xgboost_params,
 )
 from core.src.meta_model.optimize_parameters.selection import select_one_standard_error_trial
+from core.src.meta_model.xgboost_dmatrix import build_xgboost_dmatrix
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 DEFAULT_OPTIMIZATION_DATASET_PATH: Path = FEATURE_SELECTION_FILTERED_DATASET_PARQUET
@@ -146,14 +148,16 @@ def _evaluate_single_fold(
         cached_fold = fold_matrix_cache_by_index.get(fold_context.fold.index)
     active_fold_context = cached_fold.fold_context if cached_fold is not None else fold_context
     fold = active_fold_context.fold
-    feature_columns = dataset_bundle.feature_columns
     if cached_fold is not None:
         validation_matrix = cached_fold.validation_matrix
     else:
-        validation_matrix = xgb.DMatrix(
-            np.ascontiguousarray(dataset_bundle.feature_matrix[fold.validation_indices]),
-            label=np.ascontiguousarray(dataset_bundle.target_array[fold.validation_indices]),
-            feature_names=feature_columns,
+        validation_slice = pd.DataFrame(
+            dataset_bundle.feature_frame.iloc[fold.validation_indices].copy(),
+        )
+        validation_matrix = build_xgboost_dmatrix(
+            xgb,
+            validation_slice,
+            np.ascontiguousarray(dataset_bundle.target_array[fold.validation_indices]),
         )
 
     def _daily_rank_ic_metric(predictions: np.ndarray, dmatrix: Any) -> tuple[str, float]:
@@ -195,10 +199,13 @@ def _evaluate_single_fold(
             train_window_label = cached_train_window.label
             train_window_coverage = cached_train_window.coverage_fraction
         else:
-            train_matrix = xgb.DMatrix(
-                np.ascontiguousarray(dataset_bundle.feature_matrix[train_window.train_indices]),
-                label=np.ascontiguousarray(dataset_bundle.target_array[train_window.train_indices]),
-                feature_names=feature_columns,
+            train_slice = pd.DataFrame(
+                dataset_bundle.feature_frame.iloc[train_window.train_indices].copy(),
+            )
+            train_matrix = build_xgboost_dmatrix(
+                xgb,
+                train_slice,
+                np.ascontiguousarray(dataset_bundle.target_array[train_window.train_indices]),
             )
         evaluation_history: dict[str, dict[str, list[float]]] = {}
         booster = xgb.train(
@@ -596,7 +603,7 @@ def _load_dataset_bundle_with_plan(
     parallelism_plan = resolve_parallelism(
         None,
         config.fold_count,
-        dataset_bundle.feature_matrix.nbytes,
+        optimization_feature_payload_bytes(dataset_bundle),
         accelerator=accelerator,
     )
     return dataset_bundle, feature_columns, folds, fold_contexts, parallelism_plan
@@ -610,10 +617,10 @@ def _log_optimization_plan(
     config: OptimizationConfig,
     acceleration_plan: AccelerationPlan,
 ) -> None:
-    feature_matrix_mb = dataset_bundle.feature_matrix.nbytes / (1024.0 * 1024.0)
+    feature_payload_mb = optimization_feature_payload_bytes(dataset_bundle) / (1024.0 * 1024.0)
     LOGGER.info(
-        "Memory-aware parallelism: feature_matrix=%.2f MB | requested_folds=%d | fold_workers=%d | threads_per_fold=%d",
-        feature_matrix_mb,
+        "Parallelism: feature_payload=%.2f MB | requested_folds=%d | fold_workers=%d | threads_per_fold=%d (all usable cores)",
+        feature_payload_mb,
         config.fold_count,
         parallelism_plan.fold_workers,
         parallelism_plan.threads_per_fold,

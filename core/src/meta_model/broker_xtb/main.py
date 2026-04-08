@@ -21,6 +21,7 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    """Download XTB equity PDF, extract symbols, and save the reference snapshot."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     with tempfile.TemporaryDirectory(prefix="xtb-equity-pdf-") as temp_dir:
         pdf_path = Path(temp_dir) / "equity-table-uk.pdf"
@@ -33,13 +34,11 @@ def main() -> None:
         payload,
         output_path=XTB_INSTRUMENT_SPECS_REFERENCE_JSON,
     )
-    stock_count = sum(1 for item in payload if item["instrument_group"] == "stock_cfd")
-    index_count = sum(1 for item in payload if item["instrument_group"] == "index_cfd")
+    stock_count = sum(1 for item in payload if item["instrument_group"] == "stock_cash")
     LOGGER.info(
-        "Saved XTB reference snapshot: %s | stock_cfd=%d | index_cfd=%d",
+        "Saved XTB reference snapshot: %s | stock_cash=%d",
         output_path,
         stock_count,
-        index_count,
     )
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Orchestrator for deep per-ticker features: price context, path, event, state."""
+
 import pandas as pd
 
 from core.src.meta_model.features_engineering.deep.event_features import add_event_features

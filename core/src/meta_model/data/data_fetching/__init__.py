@@ -1,3 +1,7 @@
+"""Data-fetching pipelines: S&P 500 prices, macro, cross-asset, sentiment, calendar."""
+
+from __future__ import annotations
+
 from .calendar_pipeline import CalendarConfig, build_calendar_dataset
 from .cross_asset_pipeline import CrossAssetConfig, build_cross_asset_dataset
 from .macro_pipeline import MacroConfig, build_macro_dataset

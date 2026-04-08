@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Dataset loading, feature-column resolution, and schema manifest for optimisation."""
+
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +15,11 @@ from core.src.meta_model.data.paths import (
     FEATURE_SELECTION_SCHEMA_MANIFEST_JSON,
 )
 from core.src.meta_model.data.registry import compute_feature_schema_hash, load_feature_schema_manifest
-from core.src.meta_model.model_contract import is_excluded_feature_column
+from core.src.meta_model.model_contract import (
+    is_excluded_feature_column,
+    is_structural_categorical_feature_column,
+    is_temporarily_disabled_alpha_feature_column,
+)
 from core.src.meta_model.optimize_parameters.config import (
     DATE_COLUMN,
     SPLIT_COLUMN,
@@ -43,11 +49,23 @@ def resolve_feature_schema_manifest_path(dataset_path: Path) -> Path | None:
     return adjacent_manifest if adjacent_manifest.exists() else None
 
 
+def optimization_feature_payload_bytes(bundle: "OptimizationDatasetBundle") -> int:
+    return int(bundle.feature_frame.memory_usage(deep=True).sum() + bundle.target_array.nbytes)
+
+
+def bundle_has_native_xgboost_categoricals(bundle: "OptimizationDatasetBundle") -> bool:
+    return any(
+        isinstance(bundle.feature_frame[column_name].dtype, pd.CategoricalDtype)
+        for column_name in bundle.feature_columns
+        if column_name in bundle.feature_frame.columns
+    )
+
+
 @dataclass(frozen=True)
 class OptimizationDatasetBundle:
     metadata: pd.DataFrame
     feature_columns: list[str]
-    feature_matrix: np.ndarray
+    feature_frame: pd.DataFrame
     target_array: np.ndarray
 
 
@@ -89,13 +107,28 @@ def load_preprocessed_dataset(
     return ordered
 
 
+def _column_eligible_as_feature(column_name: str, series: pd.Series) -> bool:
+    if is_excluded_feature_column(column_name):
+        return False
+    if is_temporarily_disabled_alpha_feature_column(column_name):
+        return False
+    if is_structural_categorical_feature_column(column_name):
+        return True
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return True
+    return False
+
+
 def build_feature_columns(data: pd.DataFrame) -> list[str]:
     feature_columns: list[str] = []
     skipped_non_numeric_columns: list[str] = []
     for column_name in data.columns:
-        if is_excluded_feature_column(column_name):
-            continue
         column_series = data[column_name]
+        if not _column_eligible_as_feature(column_name, column_series):
+            continue
+        if is_structural_categorical_feature_column(column_name):
+            feature_columns.append(column_name)
+            continue
         if pd.api.types.is_numeric_dtype(column_series) or pd.api.types.is_bool_dtype(column_series):
             feature_columns.append(column_name)
             continue
@@ -109,6 +142,14 @@ def build_feature_columns(data: pd.DataFrame) -> list[str]:
     return feature_columns
 
 
+def _prepare_structural_series(series: pd.Series) -> pd.Series:
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        return series.astype("category")
+    string_series = series.astype("string")
+    filled = string_series.fillna("__missing__")
+    return filled.astype("category")
+
+
 def validate_feature_schema_manifest(
     feature_columns: list[str],
     dataset_path: Path,
@@ -117,16 +158,21 @@ def validate_feature_schema_manifest(
     if manifest_path is None or not manifest_path.exists():
         return
     manifest = load_feature_schema_manifest(manifest_path)
-    manifest_feature_names = _normalize_manifest_feature_names(
-        manifest.get("feature_names", manifest.get("feature_columns")),
+    manifest_feature_names = [
+        feature_name
+        for feature_name in _normalize_manifest_feature_names(
+            manifest.get("feature_names", manifest.get("feature_columns")),
+        )
+        if not is_temporarily_disabled_alpha_feature_column(feature_name)
+    ]
+    expected_hash = compute_feature_schema_hash(manifest_feature_names)
+    actual_hash = compute_feature_schema_hash(
+        [
+            feature_name
+            for feature_name in feature_columns
+            if not is_temporarily_disabled_alpha_feature_column(feature_name)
+        ],
     )
-    expected_hash = str(
-        manifest.get(
-            "feature_schema_hash",
-            compute_feature_schema_hash(manifest_feature_names),
-        ),
-    )
-    actual_hash = compute_feature_schema_hash(feature_columns)
     if actual_hash != expected_hash:
         raise ValueError(
             "Optimization dataset feature schema does not match the feature-selection manifest.",
@@ -140,14 +186,26 @@ def build_optimization_dataset_bundle(
     feature_columns = build_feature_columns(data)
     if not feature_columns:
         raise ValueError(
-            "Optimization dataset contains no numeric feature columns after exclusions.",
+            "Optimization dataset contains no feature columns after exclusions.",
         )
     validate_feature_schema_manifest(feature_columns, dataset_path)
-    feature_frame = pd.DataFrame(data.loc[:, feature_columns].copy())
-    feature_matrix = np.ascontiguousarray(
-        feature_frame.to_numpy(dtype=np.float32, copy=False),
-    )
-    invalid_mask = ~np.isfinite(feature_matrix)
+    raw_frame = pd.DataFrame(data.loc[:, feature_columns].copy())
+    feature_parts: list[pd.Series] = []
+    for column_name in feature_columns:
+        column_series = raw_frame[column_name]
+        if is_structural_categorical_feature_column(column_name):
+            feature_parts.append(_prepare_structural_series(column_series))
+            continue
+        numeric = pd.to_numeric(column_series, errors="coerce").astype(np.float32)
+        feature_parts.append(numeric)
+    feature_frame = pd.concat(feature_parts, axis=1)
+    feature_frame.columns = feature_columns
+    invalid_mask = np.zeros(feature_frame.shape, dtype=bool)
+    for column_index, column_name in enumerate(feature_columns):
+        if is_structural_categorical_feature_column(column_name):
+            continue
+        column_values = feature_frame.iloc[:, column_index].to_numpy(dtype=np.float64, copy=False)
+        invalid_mask[:, column_index] = ~np.isfinite(column_values)
     if invalid_mask.any():
         invalid_counts = invalid_mask.sum(axis=0, dtype=np.int64)
         affected_columns = [
@@ -159,22 +217,29 @@ def build_optimization_dataset_bundle(
             "Optimization dataset contained non-finite feature values; coercing them to NaN before XGBoost | affected_columns=%s",
             ",".join(affected_columns[:20]),
         )
-        feature_matrix[invalid_mask] = np.nan
+        for column_index, column_name in enumerate(feature_columns):
+            if is_structural_categorical_feature_column(column_name):
+                continue
+            mask = invalid_mask[:, column_index]
+            if bool(mask.any()):
+                feature_frame.iloc[mask, column_index] = np.nan
     target_array = np.ascontiguousarray(
         data[TARGET_COLUMN].to_numpy(dtype=np.float32, copy=False),
     )
     metadata = data.loc[:, [DATE_COLUMN, TICKER_COLUMN, SPLIT_COLUMN]].copy()
+    payload_mb = (
+        float(feature_frame.memory_usage(deep=True).sum()) + float(target_array.nbytes)
+    ) / (1024.0 * 1024.0)
     LOGGER.info(
-        "Prepared optimization dataset bundle: rows=%d | features=%d | matrix_dtype=%s | feature_matrix=%.2f MB | target=%.2f MB",
+        "Prepared optimization dataset bundle: rows=%d | features=%d | feature_payload=%.2f MB | target=%.2f MB",
         len(metadata),
         len(feature_columns),
-        feature_matrix.dtype,
-        feature_matrix.nbytes / (1024.0 * 1024.0),
+        payload_mb,
         target_array.nbytes / (1024.0 * 1024.0),
     )
     return OptimizationDatasetBundle(
         metadata=metadata,
         feature_columns=feature_columns,
-        feature_matrix=feature_matrix,
+        feature_frame=feature_frame,
         target_array=target_array,
     )

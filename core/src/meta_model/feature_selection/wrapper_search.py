@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Beam-search wrapper for feature group selection with parallel evaluation."""
+
 from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace

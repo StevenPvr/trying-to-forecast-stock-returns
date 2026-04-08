@@ -1,16 +1,12 @@
 """Shared column names and the temporal contract for labels vs features.
 
-One row is (ticker, **signal day J**): the trading session whose close is used to
-compute the signal. With the default ``EXECUTION_LAG_DAYS == 1``, execution happens
-at the next regular open (J+1).
+One row is (ticker, signal day J): decision is made after close(J) when all same-day
+market features are available.
 
-- **Features** on that row must be known by the decision timestamp (after close of J
-    in the default setup). Lagged columns remain valid and same-day features are valid
-    only when they are observable at decision time.
-- **Primary week target** (``WEEK_HOLD_*``): log return from
-    **open(J + EXECUTION_LAG_DAYS)** to **close** five NYSE trading sessions later.
-
-Setting ``EXECUTION_LAG_DAYS == 0`` switches back to same-day open execution.
+- Features on that row must be known at close(J).
+- Trading execution default: next regular open (J+1).
+- Primary week target (WEEK_HOLD_*): log return from open(J+1) to close(J+6)
+    (five sessions after entry).
 """
 
 from __future__ import annotations
@@ -39,7 +35,7 @@ SHORT_HOLD_NET_RETURN_COLUMN: str = "target_short_hold_1d_to_2d_net_log_return"
 MEDIUM_HOLD_GROSS_RETURN_COLUMN: str = "target_medium_hold_3d_to_5d_log_return"
 MEDIUM_HOLD_NET_RETURN_COLUMN: str = "target_medium_hold_3d_to_5d_net_log_return"
 
-# Row date J = execution day; entry = open(J); exit = close five sessions later (NYSE week).
+# Row date J = signal day; entry = open(J+1); exit = close five sessions after entry.
 WEEK_HOLD_GROSS_RETURN_COLUMN: str = "target_week_hold_5sessions_close_log_return"
 WEEK_HOLD_NET_RETURN_COLUMN: str = "target_week_hold_5sessions_net_log_return"
 WEEK_HOLD_BENCHMARK_RETURN_COLUMN: str = "benchmark_week_hold_net_log_return"
@@ -74,16 +70,24 @@ LABEL_EMBARGO_DAYS: int = EXECUTION_LAG_DAYS + HOLD_PERIOD_DAYS
 TARGET_PREFIXES: tuple[str, ...] = ("target_",)
 BENCHMARK_PREFIXES: tuple[str, ...] = ("benchmark_",)
 HIGH_LEVEL_CONTEXT_PREFIXES: tuple[str, ...] = ("hl_context_",)
+TEMPORARILY_DISABLED_ALPHA_FEATURE_PREFIXES: tuple[str, ...] = ("earnings_",)
 EXACT_EXCLUDED_FEATURE_COLUMNS: frozenset[str] = frozenset({
     DATE_COLUMN,
-    TICKER_COLUMN,
     SPLIT_COLUMN,
     LEGACY_TARGET_COLUMN,
     SIGNAL_DATE_COLUMN,
 })
 
+# Always-on identity / GICS columns for XGBoost native categoricals (not scored in SFI).
+STRUCTURAL_CATEGORICAL_FEATURE_COLUMNS: tuple[str, ...] = (
+    TICKER_COLUMN,
+    "company_sector",
+    "company_industry",
+)
+
 
 def is_excluded_feature_column(column_name: str) -> bool:
+    """Return True if *column_name* must never be used as a model feature."""
     if column_name in EXACT_EXCLUDED_FEATURE_COLUMNS:
         return True
     if column_name.startswith(HIGH_LEVEL_CONTEXT_PREFIXES):
@@ -91,3 +95,29 @@ def is_excluded_feature_column(column_name: str) -> bool:
     if column_name.startswith(TARGET_PREFIXES):
         return True
     return column_name.startswith(BENCHMARK_PREFIXES)
+
+
+def is_temporarily_disabled_alpha_feature_column(column_name: str) -> bool:
+    """Return True if *column_name* belongs to a temporarily disabled alpha group."""
+    return column_name.startswith(TEMPORARILY_DISABLED_ALPHA_FEATURE_PREFIXES)
+
+
+def is_structural_categorical_feature_column(column_name: str) -> bool:
+    """Return True if *column_name* is a structural categorical (ticker, sector, industry)."""
+    return column_name in STRUCTURAL_CATEGORICAL_FEATURE_COLUMNS
+
+
+def merge_structural_feature_names_into_selected(
+    selected_feature_names: list[str],
+    *,
+    available_columns: frozenset[str] | set[str],
+) -> list[str]:
+    """Prepend structural categoricals present in the dataset; dedupe against selected list."""
+    available = set(available_columns)
+    structural = [name for name in STRUCTURAL_CATEGORICAL_FEATURE_COLUMNS if name in available]
+    structural_set = set(structural)
+    tail = [name for name in selected_feature_names if name not in structural_set]
+    merged = [*structural, *tail]
+    if len(merged) != len(set(merged)):
+        raise ValueError("merge_structural_feature_names_into_selected produced duplicate feature names.")
+    return merged

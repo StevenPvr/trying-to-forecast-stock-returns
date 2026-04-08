@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Dataset loading, feature-column resolution, and schema validation for the evaluate pipeline."""
+
 from pathlib import Path
 from typing import cast
 
@@ -17,8 +19,9 @@ from core.src.meta_model.model_contract import (
     TICKER_COLUMN,
     TRAIN_SPLIT_NAME,
     VAL_SPLIT_NAME,
+    is_temporarily_disabled_alpha_feature_column,
 )
-from core.src.meta_model.model_contract import is_excluded_feature_column
+from core.src.meta_model.optimize_parameters.dataset import build_feature_columns
 
 
 def _normalize_manifest_feature_names(raw_feature_names: object) -> list[str]:
@@ -41,6 +44,7 @@ def resolve_feature_schema_manifest_path(dataset_path: Path) -> Path | None:
 def load_preprocessed_evaluation_dataset(
     path: Path = FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
 ) -> pd.DataFrame:
+    """Load and prepare the preprocessed evaluation dataset from Parquet."""
     if not path.exists():
         raise FileNotFoundError(f"Evaluation dataset not found: {path}")
     data = pd.read_parquet(path)
@@ -49,32 +53,30 @@ def load_preprocessed_evaluation_dataset(
     return prepared.sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
 
 
-def build_feature_columns(data: pd.DataFrame) -> list[str]:
-    return [
-        column_name
-        for column_name in data.columns
-        if not is_excluded_feature_column(column_name)
-    ]
-
-
 def validate_feature_schema_manifest(
     feature_columns: list[str],
     dataset_path: Path,
 ) -> None:
+    """Verify that *feature_columns* match the saved schema manifest hash."""
     manifest_path = resolve_feature_schema_manifest_path(dataset_path)
     if manifest_path is None or not manifest_path.exists():
         return
     manifest = load_feature_schema_manifest(manifest_path)
-    manifest_feature_names = _normalize_manifest_feature_names(
-        manifest.get("feature_names", manifest.get("feature_columns")),
+    manifest_feature_names = [
+        feature_name
+        for feature_name in _normalize_manifest_feature_names(
+            manifest.get("feature_names", manifest.get("feature_columns")),
+        )
+        if not is_temporarily_disabled_alpha_feature_column(feature_name)
+    ]
+    expected_hash = compute_feature_schema_hash(manifest_feature_names)
+    actual_hash = compute_feature_schema_hash(
+        [
+            feature_name
+            for feature_name in feature_columns
+            if not is_temporarily_disabled_alpha_feature_column(feature_name)
+        ],
     )
-    expected_hash = str(
-        manifest.get(
-            "feature_schema_hash",
-            compute_feature_schema_hash(manifest_feature_names),
-        ),
-    )
-    actual_hash = compute_feature_schema_hash(feature_columns)
     if actual_hash != expected_hash:
         raise ValueError(
             "Evaluation dataset feature schema does not match the feature-selection manifest.",
@@ -84,6 +86,7 @@ def validate_feature_schema_manifest(
 def split_training_and_test_frames(
     data: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split into (train+val, test) frames using the dataset_split column."""
     train_mask = data[SPLIT_COLUMN].isin([TRAIN_SPLIT_NAME, VAL_SPLIT_NAME])
     test_mask = data[SPLIT_COLUMN] == TEST_SPLIT_NAME
     training_frame = pd.DataFrame(data.loc[train_mask].copy())

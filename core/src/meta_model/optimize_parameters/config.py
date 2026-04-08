@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Optimisation configuration: trial budget, early-stop, robustness windows."""
+
 from dataclasses import dataclass
 
 from core.src.meta_model.data.constants import RANDOM_SEED
@@ -19,8 +21,8 @@ TICKER_COLUMN: str = CONTRACT_TICKER_COLUMN
 TRAIN_SPLIT_NAME: str = CONTRACT_TRAIN_SPLIT_NAME
 VAL_SPLIT_NAME: str = CONTRACT_VAL_SPLIT_NAME
 TARGET_COLUMN: str = MODEL_TARGET_COLUMN
-DEFAULT_FOLD_COUNT: int = 12
-DEFAULT_TRIAL_COUNT: int = 200
+DEFAULT_FOLD_COUNT: int = 5
+DEFAULT_TRIAL_COUNT: int = 100
 TARGET_HORIZON_DAYS: int = LABEL_EMBARGO_DAYS
 STABILITY_PENALTY_ALPHA: float = 0.10
 TRAIN_WINDOW_STABILITY_ALPHA: float = 0.05

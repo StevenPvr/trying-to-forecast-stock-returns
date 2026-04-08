@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""S&P 500 price pipeline: constituents, PIT membership, multi-provider price download."""
+
 import dataclasses
 import datetime as dt
 import io
@@ -637,7 +639,7 @@ def _filter_membership_history_to_xtb_universe(
         ticker = str(ticker_value)
         membership_start = _as_timestamp(cast(pd.Timestamp, start_value))
         membership_end = _as_timestamp(cast(pd.Timestamp, end_value))
-        for spec in provider.find_explicit_specs(ticker, instrument_group="stock_cfd"):
+        for spec in provider.find_explicit_specs(ticker, instrument_group="stock_cash"):
             if (
                 config.xtb_max_spread_bps is not None
                 and spec.spread_bps > config.xtb_max_spread_bps

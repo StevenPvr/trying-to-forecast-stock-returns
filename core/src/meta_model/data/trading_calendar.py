@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""NYSE trading calendar utilities: session lookup, date normalisation."""
+
 from datetime import date, datetime
 from typing import Sequence, cast
 

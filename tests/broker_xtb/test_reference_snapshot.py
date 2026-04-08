@@ -26,14 +26,13 @@ def test_extract_us_stock_symbols_excludes_close_only_and_normalizes() -> None:
     assert result == ["AAPL", "BRK.B", "MSFT"]
 
 
-def test_build_xtb_reference_snapshot_payload_adds_index_overlays() -> None:
+def test_build_xtb_reference_snapshot_payload_creates_cash_equity_entries() -> None:
     payload = build_xtb_reference_snapshot_payload(["AAPL", "MSFT"])
 
-    stock_symbols = [item["symbol"] for item in payload if item["instrument_group"] == "stock_cfd"]
-    index_symbols = [item["symbol"] for item in payload if item["instrument_group"] == "index_cfd"]
+    stock_symbols = [item["symbol"] for item in payload if item["instrument_group"] == "stock_cash"]
 
     assert stock_symbols == ["AAPL", "MSFT"]
-    assert index_symbols == ["DE40", "UK100", "US100", "US500"]
+    assert all(item["minimum_order_value_eur"] == 10.0 for item in payload)
 
 
 if __name__ == "__main__":

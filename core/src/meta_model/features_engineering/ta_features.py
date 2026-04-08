@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Technical-analysis features via the ``ta`` library (Bollinger, RSI, MACD, etc.)."""
+
 import pandas as pd
 from ta import add_all_ta_features
 

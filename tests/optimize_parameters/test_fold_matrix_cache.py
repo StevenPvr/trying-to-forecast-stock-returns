@@ -12,10 +12,13 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
+from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN, STRUCTURAL_CATEGORICAL_FEATURE_COLUMNS
 from core.src.meta_model.optimize_parameters.config import OptimizationConfig
 from core.src.meta_model.optimize_parameters.cv import build_walk_forward_folds
-from core.src.meta_model.optimize_parameters.dataset import build_optimization_dataset_bundle
+from core.src.meta_model.optimize_parameters.dataset import (
+    OptimizationDatasetBundle,
+    build_optimization_dataset_bundle,
+)
 from core.src.meta_model.optimize_parameters.fold_context import build_fold_evaluation_contexts
 from core.src.meta_model.optimize_parameters.fold_matrix_cache import (
     CachedFoldMatrixBundle,
@@ -89,13 +92,26 @@ def _make_preprocessed_df() -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True)
 
 
+def _make_numeric_features_optimization_bundle() -> OptimizationDatasetBundle:
+    data = _make_preprocessed_df()
+    full = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+    numeric_columns = [
+        name for name in full.feature_columns if name not in STRUCTURAL_CATEGORICAL_FEATURE_COLUMNS
+    ]
+    return OptimizationDatasetBundle(
+        metadata=full.metadata,
+        feature_columns=numeric_columns,
+        feature_frame=pd.DataFrame(full.feature_frame.loc[:, numeric_columns].copy()),
+        target_array=full.target_array,
+    )
+
+
 class TestFoldMatrixCache:
     def test_gpu_cache_uses_dmatrix_for_train_and_validation_to_keep_max_bin_dynamic(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        data = _make_preprocessed_df()
-        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        bundle = _make_numeric_features_optimization_bundle()
         config = OptimizationConfig(fold_count=5, target_horizon_days=1)
         folds = build_walk_forward_folds(
             bundle.metadata,
@@ -154,8 +170,7 @@ class TestFoldMatrixCache:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        data = _make_preprocessed_df()
-        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        bundle = _make_numeric_features_optimization_bundle()
         config = OptimizationConfig(fold_count=5, target_horizon_days=1)
         folds = build_walk_forward_folds(
             bundle.metadata,
@@ -212,8 +227,7 @@ class TestFoldMatrixCache:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        data = _make_preprocessed_df()
-        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        bundle = _make_numeric_features_optimization_bundle()
         config = OptimizationConfig(fold_count=5, target_horizon_days=1)
         folds = build_walk_forward_folds(
             bundle.metadata,
@@ -256,6 +270,34 @@ class TestFoldMatrixCache:
         )
 
         assert cache is fake_validation_only_cache
+
+    def test_skips_gpu_cache_when_native_categorical_columns_present(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        data = _make_preprocessed_df()
+        bundle = build_optimization_dataset_bundle(data, dataset_path=Path("synthetic.parquet"))
+        config = OptimizationConfig(fold_count=5, target_horizon_days=1)
+        folds = build_walk_forward_folds(
+            bundle.metadata,
+            fold_count=config.fold_count,
+            target_horizon_days=config.target_horizon_days,
+        )
+        fold_contexts = build_fold_evaluation_contexts(bundle, folds, config)
+
+        monkeypatch.setattr(
+            "core.src.meta_model.optimize_parameters.fold_matrix_cache._load_cupy_module",
+            lambda: _FakeCuPyModule(),
+        )
+
+        cache = build_fold_matrix_cache(
+            bundle,
+            fold_contexts,
+            xgb_module=_FakeXGBoostModule(),
+            enabled=True,
+        )
+
+        assert cache is None
 
 
 if __name__ == "__main__":
