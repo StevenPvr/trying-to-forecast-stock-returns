@@ -48,6 +48,10 @@ def estimate_trade_cost(
         0.0,
     )
     billable_turnover_eur = max(normalized_order_value - free_turnover_remaining, 0.0)
+    free_tier_applies = (
+        spec.instrument_group == "stock_cash"
+        and billable_turnover_eur <= 0.0
+    )
     commission_amount_eur = 0.0
     if billable_turnover_eur > 0.0:
         commission_amount_eur = max(
@@ -55,8 +59,8 @@ def estimate_trade_cost(
             billable_turnover_eur * spec.commission_rate,
         )
     fx_conversion_amount_eur = 0.0
-    if spec.currency.upper() != account_currency.upper():
-        fx_conversion_amount_eur = normalized_order_value * (spec.fx_conversion_bps / 10_000.0)
+    if not free_tier_applies and spec.currency.upper() != account_currency.upper():
+        fx_conversion_amount_eur = billable_turnover_eur * (spec.fx_conversion_bps / 10_000.0)
     total_cost_amount_eur = commission_amount_eur + fx_conversion_amount_eur
     total_cost_rate = 0.0
     if normalized_order_value > 0.0:

@@ -16,6 +16,7 @@ from core.src.meta_model.broker_xtb.specs import (
 )
 from core.src.meta_model.data.data_reference.reference_pipeline import ensure_earnings_history_output
 from core.src.meta_model.data.paths import REFERENCE_EARNINGS_HISTORY_CSV
+from core.src.meta_model.features_engineering.config import TRADING_DAYS_PER_YEAR
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -98,23 +99,26 @@ def _add_price_primitives(data: pd.DataFrame) -> pd.DataFrame:
         prepared["stock_close_price"],
         prepared["stock_open_price"],
     )
-    prepared[f"{TEMP_PREFIX}close_log_return"] = _safe_log_ratio(
-        prepared["stock_close_price"],
-        prepared[f"{TEMP_PREFIX}prev_close"],
-    )
     prepared[f"{TEMP_PREFIX}true_range_pct"] = _compute_true_range_pct(prepared)
     prepared[f"{TEMP_PREFIX}atr_21d"] = grouped[f"{TEMP_PREFIX}true_range_pct"].transform(
         lambda series: series.rolling(21, min_periods=21).mean(),
     )
-    prepared[f"{TEMP_PREFIX}realized_vol_5d"] = grouped[f"{TEMP_PREFIX}close_log_return"].transform(
-        lambda series: series.rolling(5, min_periods=5).std(),
-    )
-    prepared[f"{TEMP_PREFIX}realized_vol_21d"] = grouped[f"{TEMP_PREFIX}close_log_return"].transform(
-        lambda series: series.rolling(21, min_periods=21).std(),
-    )
-    prepared[f"{TEMP_PREFIX}realized_vol_63d"] = grouped[f"{TEMP_PREFIX}close_log_return"].transform(
-        lambda series: series.rolling(63, min_periods=63).std(),
-    )
+    if "quant_realized_vol_21d" not in prepared.columns:
+        close_log_return: pd.Series = _safe_log_ratio(
+            prepared["stock_close_price"],
+            prepared[f"{TEMP_PREFIX}prev_close"],
+        )
+        prepared[f"{TEMP_PREFIX}close_log_return"] = close_log_return
+        clr_grouped = grouped[f"{TEMP_PREFIX}close_log_return"]
+        prepared[f"{TEMP_PREFIX}realized_vol_5d"] = clr_grouped.transform(
+            lambda s: s.rolling(5, min_periods=5).std(),
+        )
+        prepared[f"{TEMP_PREFIX}realized_vol_21d"] = clr_grouped.transform(
+            lambda s: s.rolling(21, min_periods=21).std(),
+        )
+        prepared[f"{TEMP_PREFIX}realized_vol_63d"] = clr_grouped.transform(
+            lambda s: s.rolling(63, min_periods=63).std(),
+        )
     prepared[f"{TEMP_PREFIX}gap_vol_21d"] = grouped[f"{TEMP_PREFIX}gap_return"].transform(
         lambda series: series.rolling(21, min_periods=21).std(),
     )
@@ -155,10 +159,11 @@ def _add_xtb_features(data: pd.DataFrame, spec_provider: BrokerSpecProvider) -> 
     prepared["xtb_expected_intraday_cost_rate"] = zero_rates
     prepared["xtb_expected_overnight_cost_rate"] = zero_rates.copy()
     spread_rate = spread_bps / 10_000.0
-    prepared["xtb_spread_to_realized_vol_21d"] = _safe_divide(
-        spread_rate,
-        prepared[f"{TEMP_PREFIX}realized_vol_21d"],
-    )
+    if "quant_realized_vol_21d" in prepared.columns:
+        vol_21d: pd.Series = _resolve_numeric_feature(prepared, "quant_realized_vol_21d") / np.sqrt(TRADING_DAYS_PER_YEAR)
+    else:
+        vol_21d = _resolve_numeric_feature(prepared, f"{TEMP_PREFIX}realized_vol_21d")
+    prepared["xtb_spread_to_realized_vol_21d"] = _safe_divide(spread_rate, vol_21d)
     prepared["xtb_spread_to_gap_abs"] = _safe_divide(
         spread_rate,
         prepared[f"{TEMP_PREFIX}gap_return"].abs(),
@@ -211,14 +216,24 @@ def _add_open_features(data: pd.DataFrame) -> pd.DataFrame:
 
 def _add_regime_features(data: pd.DataFrame) -> pd.DataFrame:
     prepared = pd.DataFrame(data.copy())
-    prepared["quant_realized_vol_ratio_5d_21d"] = _safe_divide(
-        prepared[f"{TEMP_PREFIX}realized_vol_5d"],
-        prepared[f"{TEMP_PREFIX}realized_vol_21d"],
+    has_quant_vol: bool = "quant_realized_vol_21d" in prepared.columns
+    vol_5d: pd.Series = (
+        _resolve_numeric_feature(prepared, "quant_realized_vol_5d")
+        if has_quant_vol
+        else _resolve_numeric_feature(prepared, f"{TEMP_PREFIX}realized_vol_5d")
     )
-    prepared["quant_realized_vol_ratio_21d_63d"] = _safe_divide(
-        prepared[f"{TEMP_PREFIX}realized_vol_21d"],
-        prepared[f"{TEMP_PREFIX}realized_vol_63d"],
+    vol_21d: pd.Series = (
+        _resolve_numeric_feature(prepared, "quant_realized_vol_21d")
+        if has_quant_vol
+        else _resolve_numeric_feature(prepared, f"{TEMP_PREFIX}realized_vol_21d")
     )
+    vol_63d: pd.Series = (
+        _resolve_numeric_feature(prepared, "quant_realized_vol_63d")
+        if has_quant_vol
+        else _resolve_numeric_feature(prepared, f"{TEMP_PREFIX}realized_vol_63d")
+    )
+    prepared["quant_realized_vol_ratio_5d_21d"] = _safe_divide(vol_5d, vol_21d)
+    prepared["quant_realized_vol_ratio_21d_63d"] = _safe_divide(vol_21d, vol_63d)
     prepared["quant_gap_vol_ratio_21d_63d"] = _safe_divide(
         prepared[f"{TEMP_PREFIX}gap_vol_21d"],
         prepared[f"{TEMP_PREFIX}gap_vol_63d"],
@@ -452,8 +467,8 @@ def _compute_rsi_series(prices: pd.Series, window: int = 14) -> pd.Series:
     delta = prices.diff()
     gains = cast_series(delta.clip(lower=0.0))
     losses = cast_series((-delta).clip(lower=0.0))
-    avg_gain = gains.rolling(window, min_periods=window).mean()
-    avg_loss = losses.rolling(window, min_periods=window).mean()
+    avg_gain = gains.ewm(alpha=1.0 / window, min_periods=window, adjust=False).mean()
+    avg_loss = losses.ewm(alpha=1.0 / window, min_periods=window, adjust=False).mean()
     relative_strength = _safe_divide(avg_gain, avg_loss)
     rsi = 100.0 - (100.0 / (1.0 + relative_strength))
     zero_loss_mask = avg_loss.notna() & avg_gain.notna() & np.isclose(avg_loss, 0.0)

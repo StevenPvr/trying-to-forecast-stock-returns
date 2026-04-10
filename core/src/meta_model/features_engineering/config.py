@@ -79,3 +79,4 @@ CROSS_SECTIONAL_BASE_FEATURES: tuple[str, ...] = (
     f"{QUANT_FEATURE_PREFIX}relative_strength_63d",
     f"{QUANT_FEATURE_PREFIX}volume_ratio_21d",
 )
+CROSS_SECTIONAL_ZSCORE_CLIP: float = 5.0

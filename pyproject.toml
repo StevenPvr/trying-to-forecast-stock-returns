@@ -27,6 +27,7 @@ dependencies = [
 	"pypdf>=6.9.2",
 	"wrds>=3.1.6",
 	"fork>=0.1",
+	"pyscipopt>=6.1.0",
 ]
 
 [project.optional-dependencies]

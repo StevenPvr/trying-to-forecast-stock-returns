@@ -27,6 +27,7 @@ TARGET_HORIZON_DAYS: int = LABEL_EMBARGO_DAYS
 STABILITY_PENALTY_ALPHA: float = 0.10
 TRAIN_WINDOW_STABILITY_ALPHA: float = 0.05
 COMPLEXITY_PENALTY_ALPHA: float = 0.01
+COMPLEXITY_MAX_DEPTH_NORMALIZER: int = 4
 OBJECTIVE_STANDARD_ERROR_BOOTSTRAP_SAMPLES: int = 1024
 OPTUNA_STUDY_NAME: str = "xgboost_walk_forward_daily_rank_ic"
 EARLY_STOPPING_ROUNDS: int = 100
@@ -59,3 +60,4 @@ class OptimizationConfig:
     gpu_device_id: int = GPU_DEVICE_ID
     enable_gpu_matrix_cache: bool = ENABLE_GPU_MATRIX_CACHE
     early_stopping_metric_mode: str = EARLY_STOPPING_METRIC_MODE
+    train_split_name: str = TRAIN_SPLIT_NAME

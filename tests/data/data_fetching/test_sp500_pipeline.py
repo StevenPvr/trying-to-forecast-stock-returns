@@ -723,6 +723,22 @@ class TestFetchStooqSymbol:
         assert result is None
 
     @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.requests.get")
+    def test_apikey_prompt_returns_none(self, mock_get: MagicMock) -> None:
+        mock_resp: MagicMock = MagicMock()
+        mock_resp.text = (
+            "Get your apikey:\n\n"
+            "1. Open https://stooq.com/q/d/?s=antm.us&get_apikey\n"
+            "2. Enter the captcha code.\n"
+        )
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        result: pd.DataFrame | None = _fetch_stooq_symbol(
+            "antm.us", "2020-01-06", "2020-01-10",
+        )
+        assert result is None
+
+    @patch("core.src.meta_model.data.data_fetching.sp500_pipeline.requests.get")
     def test_empty_csv(self, mock_get: MagicMock) -> None:
         csv_text: str = "Date,Open,High,Low,Volume\n"
         mock_resp: MagicMock = MagicMock()

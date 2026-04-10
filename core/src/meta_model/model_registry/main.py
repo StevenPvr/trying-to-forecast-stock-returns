@@ -206,7 +206,9 @@ def _select_factor_composite_columns(feature_columns: list[str]) -> dict[str, li
     }
     if any(buckets.values()):
         return buckets
-    return {"fallback": list(feature_columns)}
+    raise ValueError(
+        "factor_composite requires at least one semantic bucket among momentum, reversal, volatility, size, or liquidity.",
+    )
 
 
 def _fit_factor_composite_model(
@@ -388,7 +390,6 @@ def _predict_factor_composite_model(
         "volatility": -1.0,
         "size": -1.0,
         "liquidity": 1.0,
-        "fallback": 1.0,
     }
     for bucket_name, columns in selected_columns.items():
         if not columns:

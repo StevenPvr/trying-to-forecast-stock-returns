@@ -98,22 +98,16 @@ def get_laggable_feature_columns(
     ]
 
 
-def downcast_numeric_columns(data: pd.DataFrame) -> pd.DataFrame:
-    optimized: pd.DataFrame = data.copy()
-    for column in optimized.columns:
-        series = optimized[column]
-        if pd.api.types.is_float_dtype(series):
-            optimized[column] = pd.to_numeric(series, downcast="float")
-        elif pd.api.types.is_integer_dtype(series):
-            optimized[column] = pd.to_numeric(series, downcast="integer")
-    return optimized
-
-
 def build_lagged_feature_group(
     data: pd.DataFrame,
     laggable_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     lagged_data: pd.DataFrame = data.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
+    unique_ticker_count: int = lagged_data["ticker"].nunique()
+    if unique_ticker_count != 1:
+        raise ValueError(
+            f"build_lagged_feature_group expects single-ticker input, got {unique_ticker_count} tickers",
+        )
     selected_laggable_columns: list[str] = (
         laggable_columns
         if laggable_columns is not None

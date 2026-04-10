@@ -126,7 +126,25 @@ Ordre d’exécution:
 7. `.venv/bin/python core/src/meta_model/data/data_preprocessing/main.py`
 8. `.venv/bin/python core/src/meta_model/feature_selection/main.py`
 9. `.venv/bin/python core/src/meta_model/optimize_parameters/main.py`
-10. `.venv/bin/python core/src/meta_model/evaluate/main.py`
+10. `.venv/bin/python core/src/meta_model/meta_labeling/main.py`
+11. `.venv/bin/python core/src/meta_model/portfolio_optimization/main.py`
+12. `.venv/bin/python core/src/meta_model/evaluate/main.py`
+
+## Chaîne aval canonique
+
+À partir de `feature_selection`, l’ordre est désormais strict:
+
+1. `optimize_parameters`
+2. `meta_labeling`
+3. `portfolio_optimization`
+4. `evaluate`
+
+Le sens des étapes:
+
+- `optimize_parameters` fige les hyperparamètres du modèle primaire,
+- `meta_labeling` produit les prédictions OOS du primaire puis entraîne le classifieur méta,
+- `portfolio_optimization` optimise le solveur MIQP sur le signal raffiné,
+- `evaluate` rejoue ensuite la chaîne complète sur le split `test`.
 
 ## Notes opérationnelles importantes
 

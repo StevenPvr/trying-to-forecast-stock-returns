@@ -51,7 +51,7 @@ def _make_fold(
 
 
 class TestFeatureSelectionObjective:
-    def test_aggregate_subset_score_weights_recent_folds(self) -> None:
+    def test_aggregate_subset_score_uniform_weights(self) -> None:
         score = aggregate_subset_score(
             ["feature_a", "feature_b"],
             [
@@ -65,7 +65,7 @@ class TestFeatureSelectionObjective:
                 ),
                 _make_fold(
                     2,
-                    weight=2.0,
+                    weight=1.0,
                     net_pnl_after_costs=0.04,
                     alpha_over_benchmark_net=0.03,
                     turnover_annualized=0.60,
@@ -74,10 +74,11 @@ class TestFeatureSelectionObjective:
             ],
         )
 
-        assert score.weighted_net_pnl_after_costs == pytest.approx(0.03)
-        assert score.weighted_daily_rank_ic_mean == pytest.approx(0.03)
-        assert score.weighted_alpha_over_benchmark_net == pytest.approx(0.0233333333)
+        assert score.weighted_net_pnl_after_costs == pytest.approx(0.025)
+        assert score.weighted_daily_rank_ic_mean == pytest.approx(0.025)
+        assert score.weighted_alpha_over_benchmark_net == pytest.approx(0.02)
         assert score.positive_fold_share == pytest.approx(1.0)
+        assert score.pnl_positive_fold_share == pytest.approx(1.0)
 
     def test_is_candidate_move_acceptable_rejects_unstable_candidate(self) -> None:
         config = FeatureSelectionConfig(

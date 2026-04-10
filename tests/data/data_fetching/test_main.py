@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.src.meta_model.data.data_fetching.main import (
+    _adjust_ohlc_prices,
     _resolve_pipeline_config,
     _build_date_features,
     _build_universe_company_listing,
@@ -721,6 +722,60 @@ class TestTransformPriceColumnsToLogReturns:
         df: pd.DataFrame = pd.DataFrame({"open": [100.0, 101.0]})
         result: pd.DataFrame = _transform_price_columns_to_log_returns(df)
         pd.testing.assert_frame_equal(result, df)
+
+
+# ---------------------------------------------------------------------------
+# _adjust_ohlc_prices
+# ---------------------------------------------------------------------------
+
+
+class TestAdjustOhlcPrices:
+    def test_adjusts_ohlc_by_ratio(self) -> None:
+        """A 2:1 split (adj_close = close / 2) halves all OHLC columns."""
+        df: pd.DataFrame = pd.DataFrame({
+            "date": pd.to_datetime(["2020-01-06", "2020-01-07"]),
+            "ticker": ["AAPL", "AAPL"],
+            "open": [200.0, 100.0],
+            "high": [210.0, 105.0],
+            "low": [190.0, 95.0],
+            "close": [200.0, 100.0],
+            "adj_close": [100.0, 100.0],  # split happened between day 1 and day 2
+        })
+        result: pd.DataFrame = _adjust_ohlc_prices(df)
+        # Day 1: ratio = 100/200 = 0.5 → open becomes 100
+        assert result["open"].iloc[0] == pytest.approx(100.0)
+        assert result["high"].iloc[0] == pytest.approx(105.0)
+        assert result["low"].iloc[0] == pytest.approx(95.0)
+        assert result["close"].iloc[0] == pytest.approx(100.0)
+        # Day 2: ratio = 100/100 = 1.0 → unchanged
+        assert result["open"].iloc[1] == pytest.approx(100.0)
+
+    def test_close_zero_leaves_unchanged(self) -> None:
+        """Rows with close=0 should not crash; ratio defaults to 1.0."""
+        df: pd.DataFrame = pd.DataFrame({
+            "open": [50.0], "high": [55.0], "low": [45.0],
+            "close": [0.0], "adj_close": [np.nan],
+        })
+        result: pd.DataFrame = _adjust_ohlc_prices(df)
+        assert result["open"].iloc[0] == pytest.approx(50.0)
+
+    def test_no_adj_close_returns_unchanged(self) -> None:
+        """Missing adj_close column should return df unmodified."""
+        df: pd.DataFrame = pd.DataFrame({
+            "open": [100.0], "high": [110.0], "low": [90.0], "close": [105.0],
+        })
+        result: pd.DataFrame = _adjust_ohlc_prices(df)
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_already_adjusted_is_idempotent(self) -> None:
+        """Tiingo-style data where adj_close == close → no change."""
+        df: pd.DataFrame = pd.DataFrame({
+            "open": [100.0], "high": [110.0], "low": [90.0],
+            "close": [105.0], "adj_close": [105.0],
+        })
+        result: pd.DataFrame = _adjust_ohlc_prices(df)
+        assert result["open"].iloc[0] == pytest.approx(100.0)
+        assert result["close"].iloc[0] == pytest.approx(105.0)
 
 
 # ---------------------------------------------------------------------------

@@ -12,18 +12,20 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.src.meta_model.broker_xtb.bridge import build_manual_execution_bundle
-from core.src.meta_model.broker_xtb.specs import build_default_spec_provider
+from core.src.meta_model.broker_xtb.specs import (
+    BrokerSpecProvider,
+    XtbInstrumentSpec,
+    build_default_spec_provider,
+)
 from core.src.meta_model.broker_xtb.universe import build_tradable_universe
 from core.src.meta_model.evaluate.backtest import ActiveTrade
 
 
-def test_default_spec_provider_resolves_cash_equity_defaults() -> None:
-    provider = build_default_spec_provider()
-    stock_spec = provider.resolve("ZZ_NOEXPLICIT", pd.Timestamp("2024-01-02"))
+def test_default_spec_provider_requires_explicit_snapshot(tmp_path: Path) -> None:
+    missing_specs_path = tmp_path / "missing_specs.json"
 
-    assert stock_spec.instrument_group == "stock_cash"
-    assert stock_spec.minimum_order_value_eur == pytest.approx(10.0)
-    assert stock_spec.monthly_commission_free_turnover_eur == pytest.approx(100_000.0)
+    with pytest.raises(FileNotFoundError, match="Missing XTB instrument specification snapshot"):
+        build_default_spec_provider(path=missing_specs_path)
 
 
 def test_tradable_universe_keeps_cash_equity_snapshot_symbols(tmp_path: Path) -> None:
@@ -106,7 +108,25 @@ def test_tradable_universe_skips_symbols_missing_from_explicit_snapshot(
 
 
 def test_manual_execution_bundle_contains_cash_equity_outputs() -> None:
-    spec = build_default_spec_provider().resolve("AAPL", pd.Timestamp("2024-01-02"))
+    provider = BrokerSpecProvider(
+        specs=(
+            XtbInstrumentSpec(
+                symbol="AAPL",
+                instrument_group="stock_cash",
+                currency="USD",
+                spread_bps=0.0,
+                slippage_bps=0.0,
+                long_swap_bps_daily=0.0,
+                short_swap_bps_daily=0.0,
+                margin_requirement=1.0,
+                max_adv_participation=0.05,
+                effective_from="2000-01-01",
+                fx_conversion_bps=0.0,
+            ),
+        ),
+        fallback_to_defaults=False,
+    )
+    spec = provider.resolve("AAPL", pd.Timestamp("2024-01-02"))
     trade = ActiveTrade(
         ticker="AAPL",
         side="long",
@@ -136,6 +156,8 @@ def test_manual_execution_bundle_handles_empty_trade_list() -> None:
     assert list(orders.columns) == [
         "ticker",
         "side",
+        "share_count",
+        "reference_price_eur",
         "order_value_eur",
         "signal_rank",
         "predicted_return",

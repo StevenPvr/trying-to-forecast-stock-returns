@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.src.meta_model.model_contract import MODEL_TARGET_COLUMN
 from core.src.meta_model.optimize_parameters import main as optimize_main
+from core.src.meta_model.optimize_parameters import io as optimize_io
 from core.src.meta_model.optimize_parameters.fold_context import build_fold_evaluation_contexts
 from core.src.meta_model.optimize_parameters.fold_matrix_cache import CachedFoldMatrixBundle
 from core.src.meta_model.optimize_parameters.cv import WalkForwardFold, build_walk_forward_folds
@@ -27,10 +28,9 @@ from core.src.meta_model.optimize_parameters.config import (
     EARLY_STOPPING_ROUNDS,
     OptimizationConfig,
 )
-from core.src.meta_model.optimize_parameters.objective import aggregate_fold_rank_ic, aggregate_fold_rmse
+from core.src.meta_model.optimize_parameters.objective import aggregate_fold_rank_ic
 from core.src.meta_model.optimize_parameters.parallelism import resolve_parallelism
 from core.src.meta_model.optimize_parameters.robustness import (
-    aggregate_robust_objective,
     build_train_windows,
     compute_complexity_penalty,
 )
@@ -153,7 +153,7 @@ class TestBuildWalkForwardFolds:
         folds = build_walk_forward_folds(data, fold_count=5, target_horizon_days=1)
 
         assert len(folds) == 5
-        assert [fold.weight for fold in folds] == [1.0, 2.0, 3.0, 4.0, 5.0]
+        assert [fold.weight for fold in folds] == [1.0, 1.0, 1.0, 1.0, 1.0]
         assert folds[0].train_end_date < folds[0].validation_end_date
         assert folds[-1].validation_end_date == pd.Timestamp("2019-02-14")
         assert folds[1].train_row_count > folds[0].train_row_count
@@ -170,17 +170,39 @@ class TestBuildWalkForwardFolds:
         assert folds[1].train_row_count == 5
 
 
-class TestAggregateFoldRmse:
-    def test_combines_equal_weight_fold_average_and_stability_penalty(self) -> None:
-        score = aggregate_fold_rmse(
-            fold_rmse=[0.30, 0.25, 0.22, 0.20, 0.18],
-            fold_weights=[1.0, 2.0, 3.0, 4.0, 5.0],
-            stability_penalty_alpha=0.10,
+class TestWalkForwardTemporalIntegrity:
+    def test_val_exists_path_enforces_temporal_order(self) -> None:
+        """Production default: train+val loaded → val dates form validation blocks."""
+        data = _make_preprocessed_df()
+
+        folds = build_walk_forward_folds(data, fold_count=5, target_horizon_days=1)
+
+        for fold in folds:
+            assert fold.train_end_date < fold.validation_start_date, (
+                f"Fold {fold.index}: train_end_date {fold.train_end_date} >= "
+                f"validation_start_date {fold.validation_start_date}"
+            )
+
+    def test_train_only_path_rejects_infeasible_first_fold(self) -> None:
+        """Train-only mode: fold 1 has no pre-validation data → error expected."""
+        train_dates = pd.date_range("2018-01-01", periods=30, freq="B")
+        rows: list[dict[str, object]] = []
+        for idx, date in enumerate(train_dates, start=1):
+            rows.append({
+                "date": date,
+                "ticker": "AAA",
+                "target_main": 0.001 * idx,
+                "dataset_split": "train",
+                "feature_a": float(idx),
+            })
+        data = _with_model_target(
+            pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True),
         )
 
-        assert round(score["mean_rmse"], 6) == 0.230000
-        assert round(score["std_rmse"], 6) == 0.041952
-        assert round(score["objective_score"], 6) == 0.234195
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="empty train or validation block"):
+            build_walk_forward_folds(data, fold_count=3, target_horizon_days=1)
 
 
 class TestAggregateFoldRankIc:
@@ -475,51 +497,35 @@ class TestBuildTrainWindows:
         assert "random_window_1" in labels
 
 
-class TestRobustObjective:
-    def test_penalizes_window_instability_and_complexity(self) -> None:
-        aggregate = aggregate_robust_objective(
-            fold_rmse=[0.30, 0.25, 0.22, 0.20, 0.18],
-            fold_weights=[1.0, 2.0, 3.0, 4.0, 5.0],
-            fold_window_std=[0.05, 0.04, 0.03, 0.02, 0.01],
-            stability_penalty_alpha=0.10,
-            train_window_stability_alpha=0.05,
-            complexity_penalty=0.01,
-        )
-
-        assert round(aggregate["mean_rmse"], 6) == 0.230000
-        assert round(aggregate["std_rmse"], 6) == 0.041952
-        assert round(aggregate["window_std_mean"], 6) == 0.030000
-        assert round(aggregate["objective_score"], 6) == 0.245695
-
-    def test_standard_error_reflects_full_objective_and_not_rmse_only(self) -> None:
-        aggregate = aggregate_robust_objective(
-            fold_rmse=[0.20, 0.20, 0.20, 0.20, 0.20],
-            fold_weights=[1.0, 2.0, 3.0, 4.0, 5.0],
-            fold_window_std=[0.00, 0.02, 0.00, 0.04, 0.00],
-            stability_penalty_alpha=0.10,
-            train_window_stability_alpha=0.50,
-            complexity_penalty=0.0,
-        )
-
-        assert aggregate["objective_standard_error"] > 0.0
-
-
 class TestComplexityPenalty:
     def test_grows_with_depth_and_iterations(self) -> None:
         light = compute_complexity_penalty(
-            max_depth=3,
+            max_depth=2,
             average_best_iteration=120.0,
             boost_rounds=3000,
             penalty_alpha=0.01,
         )
         heavy = compute_complexity_penalty(
-            max_depth=9,
+            max_depth=4,
             average_best_iteration=900.0,
             boost_rounds=3000,
             penalty_alpha=0.01,
         )
 
         assert heavy > light
+
+    def test_depth_normalizer_uses_search_space_bound(self) -> None:
+        penalty = compute_complexity_penalty(
+            max_depth=4,
+            average_best_iteration=0.0,
+            boost_rounds=3000,
+            penalty_alpha=0.01,
+            max_depth_normalizer=4,
+        )
+
+        # depth component: 0.01 * 0.5 * (4/4) = 0.005
+        # iteration component: 0.01 * 0.5 * 0 = 0
+        assert round(penalty, 6) == 0.005
 
 
 class TestOneStandardErrorSelection:
@@ -749,13 +755,18 @@ class TestOptimizeXGBoostParametersIntegration:
             },
         ])
 
-        def _capture_outputs(trials_frame: pd.DataFrame, best_params: dict[str, Any]) -> None:
+        def _capture_outputs(
+            trials_frame: pd.DataFrame,
+            best_params: dict[str, Any],
+            overfitting_report: Any = None,
+            **_kwargs: Any,
+        ) -> None:
             captured["trials_frame"] = trials_frame
             captured["best_params"] = best_params
 
         monkeypatch.setattr(optimize_main, "load_optuna_module", lambda: fake_optuna)
         monkeypatch.setattr(optimize_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
-        monkeypatch.setattr(optimize_main, "save_optimization_outputs", _capture_outputs)
+        monkeypatch.setattr(optimize_io, "save_optimization_outputs", _capture_outputs)
         monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: False)
 
         trials_frame, best_payload = optimize_main.optimize_xgboost_parameters(
@@ -807,10 +818,12 @@ class TestOptimizeXGBoostParametersIntegration:
         def _capture_outputs(
             trials_frame: pd.DataFrame,
             best_params: dict[str, Any],
+            overfitting_report: Any = None,
             *,
-            trials_parquet_path: Path,
-            trials_csv_path: Path,
-            best_params_path: Path,
+            trials_parquet_path: Path = Path("unused"),
+            trials_csv_path: Path = Path("unused"),
+            best_params_path: Path = Path("unused"),
+            **_kwargs: Any,
         ) -> None:
             captured["trials_frame"] = trials_frame
             captured["best_params"] = best_params
@@ -820,7 +833,7 @@ class TestOptimizeXGBoostParametersIntegration:
 
         monkeypatch.setattr(optimize_main, "load_optuna_module", lambda: fake_optuna)
         monkeypatch.setattr(optimize_main, "load_xgboost_module", lambda: _FakeXGBoostModule())
-        monkeypatch.setattr(optimize_main, "save_optimization_outputs", _capture_outputs)
+        monkeypatch.setattr(optimize_io, "save_optimization_outputs", _capture_outputs)
         monkeypatch.setattr(optimize_main, "_process_pool_available", lambda: False)
 
         optimize_main.optimize_xgboost_parameters(

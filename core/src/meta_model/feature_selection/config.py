@@ -8,6 +8,7 @@ from typing import Any
 from core.src.meta_model.data.constants import RANDOM_SEED
 from core.src.meta_model.runtime_parallelism import resolve_available_cpu_count
 
+DEFAULT_PARALLEL_WORKERS: int = 32
 DEFAULT_SELECTION_FOLD_COUNT: int = 10
 DEFAULT_GROUP_SAMPLE_SIZE: int = 50_000
 DEFAULT_MAX_GROUP_SIZE: int = 64
@@ -17,12 +18,12 @@ DEFAULT_POSITIVE_FOLD_SHARE_MIN: float = 0.50
 DEFAULT_LOWER_QUARTILE_FOLD_PNL_FLOOR: float = -0.0005
 DEFAULT_TURNOVER_GUARDRAIL_MULTIPLIER: float = 1.15
 DEFAULT_MAX_DRAWDOWN_GUARDRAIL_ADDITIVE: float = 0.05
-DEFAULT_NULL_BOOTSTRAP_COUNT: int = 32
+DEFAULT_NULL_BOOTSTRAP_COUNT: int = 2000
 DEFAULT_MAX_ACTIVE_MATRIX_GIB: float = 6.0
 DEFAULT_PROXY_TRAINING_ROUNDS: int = 128
 DEFAULT_EMIT_INPUT_INVENTORY: bool = True
-DEFAULT_PROXY_TOP_FRACTION: float = 0.02
-DEFAULT_PROXY_OPEN_HURDLE_BPS: float = 0.0
+DEFAULT_PROXY_TOP_FRACTION: float = 0.01
+DEFAULT_PROXY_OPEN_HURDLE_BPS: float = 12.0
 # Must match evaluate backtest (long-only selection); "none" is not a runtime mode there.
 DEFAULT_PROXY_NEUTRALITY_MODE: str = "long_only"
 DEFAULT_SFI_MIN_COVERAGE_FRACTION: float = 0.90
@@ -34,10 +35,12 @@ DEFAULT_TARGET_DISTANCE_CORRELATION_THRESHOLD: float = 0.005
 DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE: int = 2048
 DEFAULT_TRAIN_SAMPLING_FRACTION: float = 1.0
 DEFAULT_SELECTED_FEATURE_COUNT: int = 30
+DEFAULT_SFI_FDR_ALPHA: float = 0.10
+DEFAULT_PNL_POSITIVE_FOLD_SHARE_MIN: float = 0.40
 
 
 def _default_parallel_workers() -> int:
-    return resolve_available_cpu_count()
+    return min(DEFAULT_PARALLEL_WORKERS, resolve_available_cpu_count())
 
 
 def _build_default_proxy_xgboost_params() -> dict[str, Any]:
@@ -48,14 +51,14 @@ def _build_default_proxy_xgboost_params() -> dict[str, Any]:
         "seed": RANDOM_SEED,
         "verbosity": 0,
         "max_depth": 2,
-        "eta": 0.03372328559359028,
-        "min_child_weight": 4.611500076567313,
-        "subsample": 0.6081400083136549,
-        "colsample_bytree": 0.43551711140201593,
-        "gamma": 0.002653309978526908,
-        "lambda": 0.0172765054190332,
-        "alpha": 0.12122829698297534,
-        "max_bin": 246,
+        "eta": 0.03,
+        "min_child_weight": 5,
+        "subsample": 0.6,
+        "colsample_bytree": 0.4,
+        "gamma": 0.003,
+        "lambda": 0.02,
+        "alpha": 0.12,
+        "max_bin": 256,
     }
 
 
@@ -91,6 +94,8 @@ class FeatureSelectionConfig:
     target_distance_correlation_sample_size: int = DEFAULT_TARGET_DISTANCE_CORRELATION_SAMPLE_SIZE
     train_sampling_fraction: float = DEFAULT_TRAIN_SAMPLING_FRACTION
     selected_feature_count: int = DEFAULT_SELECTED_FEATURE_COUNT
+    sfi_fdr_alpha: float = DEFAULT_SFI_FDR_ALPHA
+    pnl_positive_fold_share_min: float = DEFAULT_PNL_POSITIVE_FOLD_SHARE_MIN
     emit_input_inventory: bool = DEFAULT_EMIT_INPUT_INVENTORY
 
     def resolved_state_evaluation_workers(self, *, fold_count: int) -> int:

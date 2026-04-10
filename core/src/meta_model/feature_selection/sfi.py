@@ -6,10 +6,12 @@ from dataclasses import replace
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 import logging
+import math
 import multiprocessing as mp
 from collections.abc import Callable
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 
 from core.src.meta_model.feature_selection.cache import FeatureSelectionRuntimeCache
@@ -66,6 +68,7 @@ def build_sfi_score_frame(
         ["objective_score", "daily_rank_ic_mean", "coverage_fraction", "feature_name"],
         ascending=[False, False, False, True],
     ).reset_index(drop=True)
+    score_frame = _apply_fdr_correction(score_frame, config)
     LOGGER.info(
         "Feature selection SFI completed: survivors=%d | under_coverage=%d",
         int(cast(pd.Series, score_frame["passes_sfi"]).sum()),
@@ -251,6 +254,59 @@ def _score_single_feature_process(feature_name: str) -> dict[str, object]:
     return _score_single_feature(_PROCESS_CACHE, _PROCESS_SCORER, feature_name, _PROCESS_CONFIG)
 
 
+def _binomial_sf(k: int, n: int, p: float) -> float:
+    """P(X >= k) for X ~ Binomial(n, p), computed without scipy."""
+    if k <= 0:
+        return 1.0
+    if k > n:
+        return 0.0
+    cumulative: float = 0.0
+    for i in range(k):
+        cumulative += math.comb(n, i) * (p ** i) * ((1.0 - p) ** (n - i))
+    return 1.0 - cumulative
+
+
+def _apply_fdr_correction(
+    score_frame: pd.DataFrame,
+    config: FeatureSelectionConfig,
+) -> pd.DataFrame:
+    """Apply Benjamini-Hochberg FDR correction on positive_fold_share p-values."""
+    fdr_alpha: float = config.sfi_fdr_alpha
+    if fdr_alpha <= 0.0 or fdr_alpha >= 1.0:
+        return score_frame
+    corrected = pd.DataFrame(score_frame.copy())
+    fold_count: int = config.fold_count
+    positive_shares = cast(pd.Series, corrected["positive_fold_share"]).to_numpy(dtype=np.float64)
+    positive_counts = np.round(positive_shares * fold_count).astype(int)
+    p_values = np.array(
+        [_binomial_sf(int(k), fold_count, 0.5) for k in positive_counts],
+        dtype=np.float64,
+    )
+    m: int = len(p_values)
+    sorted_indices = np.argsort(p_values)
+    sorted_pvals = p_values[sorted_indices]
+    bh_threshold = fdr_alpha * np.arange(1, m + 1, dtype=np.float64) / m
+    passes_bh = np.zeros(m, dtype=bool)
+    max_passing: int = -1
+    for i in range(m):
+        if sorted_pvals[i] <= bh_threshold[i]:
+            max_passing = i
+    if max_passing >= 0:
+        passes_bh[sorted_indices[: max_passing + 1]] = True
+    corrected["passes_fdr"] = passes_bh
+    fdr_rejected_count = int((~passes_bh).sum())
+    previously_passing = cast(pd.Series, corrected["passes_sfi"]).astype(bool)
+    corrected.loc[previously_passing & ~passes_bh, "passes_sfi"] = False
+    corrected.loc[previously_passing & ~passes_bh, "sfi_drop_reason"] = "rejected_fdr"
+    LOGGER.info(
+        "Feature selection FDR correction applied: fdr_alpha=%.2f | fold_count=%d | fdr_rejected=%d",
+        fdr_alpha,
+        fold_count,
+        fdr_rejected_count,
+    )
+    return corrected
+
+
 def _score_single_feature(
     cache: FeatureSelectionRuntimeCache,
     scorer: Callable[[list[str]], SubsetEconomicScore],
@@ -291,6 +347,7 @@ def _empty_subset_score(feature_name: str) -> SubsetEconomicScore:
         lower_quartile_fold_net_pnl=0.0,
         is_valid=False,
         fold_scores=tuple(),
+        pnl_positive_fold_share=0.0,
         weighted_daily_rank_ic_mean=0.0,
         weighted_daily_rank_ic_ir=0.0,
         weighted_daily_top_bottom_spread_mean=0.0,

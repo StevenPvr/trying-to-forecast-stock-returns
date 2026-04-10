@@ -1,6 +1,6 @@
 # prevision-sp500
 
-Pipeline de recherche broker-aware pour la prédiction cross-sectionnelle des stock returns et la construction d’un book CFD XTB discipliné.
+Pipeline de recherche broker-aware pour la prédiction cross-sectionnelle des stock returns, leur raffinage par méta-labeling, puis la construction d’un book CFD XTB discipliné.
 
 Le contrat de recherche du `meta_model` a été recentré autour de principes plus crédibles:
 
@@ -16,6 +16,7 @@ Le contrat de recherche du `meta_model` a été recentré autour de principes pl
 - Contrat de recherche du méta-modèle: [docs/meta-model-research-contract.md](/Users/steven/Programmation/prevision-sp500/docs/meta-model-research-contract.md)
 - Registre de features et manifests de schéma: [docs/feature-registry.md](/Users/steven/Programmation/prevision-sp500/docs/feature-registry.md)
 - Registre de modèles et promotion: [docs/model-registry.md](/Users/steven/Programmation/prevision-sp500/docs/model-registry.md)
+- Vue d’ensemble du sous-système `meta_model`: [core/src/meta_model/README.md](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/README.md)
 - Moteur portefeuille et backtest: [docs/portfolio-engine.md](/Users/steven/Programmation/prevision-sp500/docs/portfolio-engine.md)
 - Artefacts et datasets produits: [docs/data-artifacts.md](/Users/steven/Programmation/prevision-sp500/docs/data-artifacts.md)
 - Runbook de lancement: [docs/launch-runbook.md](/Users/steven/Programmation/prevision-sp500/docs/launch-runbook.md)
@@ -70,16 +71,24 @@ Le pipeline du `meta_model` est orchestré par des `main.py` et suit désormais 
    - [core/src/meta_model/optimize_parameters/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/optimize_parameters/main.py)
    - Tune XGBoost sur le dataset filtré, avec un objectif de `daily rank IC` robuste, un ledger de trials et un rapport d’overfitting.
 
-10. `model_registry`
+10. `meta_labeling`
+   - [core/src/meta_model/meta_labeling/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/meta_labeling/main.py)
+   - Produit les prédictions strictement OOS du modèle primaire sur le train post-burn puis sur la validation, entraîne un classifieur benchmark-relative, et fige le signal raffiné consommé par l’aval.
+
+11. `portfolio_optimization`
+   - [core/src/meta_model/portfolio_optimization/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/portfolio_optimization/main.py)
+   - Tune le solveur MIQP sur la validation en consommant le signal raffiné (`primary + meta`) et fige les paramètres portefeuille.
+
+12. `model_registry`
    - [core/src/meta_model/model_registry/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/model_registry/main.py)
    - Fournit les modèles comparés sur le même protocole: `ridge`, `elastic_net`, `factor_composite`, `xgboost`, et `lightgbm`.
    - Ce module est un registre partagé consommé par `optimize_parameters` et `evaluate`, pas une étape CLI distincte à lancer séparément.
 
-11. `evaluate`
+13. `evaluate`
    - [core/src/meta_model/evaluate/main.py](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/evaluate/main.py)
-   - Entraîne chaque modèle en walk-forward, compare leurs métriques signal et portefeuille, applique les garde-fous `PBO` / `DSR`, puis promeut le meilleur selon l’alpha benchmark-relative.
+   - Rejoue le primaire, le méta-modèle et le solveur MIQP sur le split `test`, puis produit les métriques signal, portefeuille et les exports d’exécution.
 
-12. `broker_xtb_bridge`
+14. `broker_xtb_bridge`
    - [core/src/meta_model/broker_xtb](/Users/steven/Programmation/prevision-sp500/core/src/meta_model/broker_xtb)
    - Produit les snapshots broker, l’univers tradable XTB, les estimations de coûts/marge, et les exports `manual_orders.csv` / `manual_watchlist.csv` / `execution_checklist.json`.
 
@@ -93,7 +102,8 @@ Points clés:
 - `execution_lag_days = 1` = les prédictions sont évaluées et backtestées à `t+1`.
 - `hold_period_days = 0` par défaut pour le primaire intraday.
 - `target_main` = label intraday brut `t+1 open -> t+1 close`.
-- `target_intraday_open_to_close_net_cs_zscore` = target d’entraînement par défaut.
+- `target_week_hold_net_cs_zscore` = target primaire du modèle de régression.
+- le méta-modèle apprend ensuite `1{target_week_hold_excess_log_return > 0}` sur des prédictions OOS du primaire.
 - le preprocessing produit aussi des labels `overnight`, `short_hold_1d_to_2d` et `medium_hold_3d_to_5d`.
 - la promotion finale compare `ridge`, `elastic_net`, `factor_composite`, `xgboost`, et éventuellement `lightgbm`.
 - la promotion finale est bloquée si les diagnostics `PBO` / `DSR` échouent.
@@ -112,6 +122,8 @@ La chaîne canonique complète, dans l’ordre exact, est la suivante:
 .venv/bin/python core/src/meta_model/data/data_preprocessing/main.py
 .venv/bin/python core/src/meta_model/feature_selection/main.py
 .venv/bin/python core/src/meta_model/optimize_parameters/main.py
+.venv/bin/python core/src/meta_model/meta_labeling/main.py
+.venv/bin/python core/src/meta_model/portfolio_optimization/main.py
 .venv/bin/python core/src/meta_model/evaluate/main.py
 ```
 
@@ -135,8 +147,12 @@ Rôle de chaque étape:
    - sélectionne les features stables train-only
 9. `optimize_parameters/main.py`
    - tune les modèles et produit le ledger / rapport anti-overfitting
-10. `evaluate/main.py`
-   - entraîne, backteste, promeut le modèle et produit les exports d’exécution manuelle
+10. `meta_labeling/main.py`
+   - produit le panel OOS du primaire, entraîne le classifieur méta et fige le signal raffiné
+11. `portfolio_optimization/main.py`
+   - tune le solveur portefeuille MIQP sur le signal raffiné
+12. `evaluate/main.py`
+   - rejoue la chaîne complète sur `test` et produit les exports d’exécution manuelle
 
 ## Commandes utiles
 
@@ -179,6 +195,8 @@ Lancer uniquement le cœur de la chaîne une fois le bootstrap déjà à jour:
 .venv/bin/python core/src/meta_model/data/data_preprocessing/main.py
 .venv/bin/python core/src/meta_model/feature_selection/main.py
 .venv/bin/python core/src/meta_model/optimize_parameters/main.py
+.venv/bin/python core/src/meta_model/meta_labeling/main.py
+.venv/bin/python core/src/meta_model/portfolio_optimization/main.py
 .venv/bin/python core/src/meta_model/evaluate/main.py
 ```
 

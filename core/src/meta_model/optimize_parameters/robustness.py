@@ -7,7 +7,10 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from core.src.meta_model.optimize_parameters.config import DATE_COLUMN
+from core.src.meta_model.optimize_parameters.config import (
+    COMPLEXITY_MAX_DEPTH_NORMALIZER,
+    DATE_COLUMN,
+)
 
 
 @dataclass(frozen=True)
@@ -91,116 +94,10 @@ def compute_complexity_penalty(
     average_best_iteration: float,
     boost_rounds: int,
     penalty_alpha: float,
+    max_depth_normalizer: int = COMPLEXITY_MAX_DEPTH_NORMALIZER,
 ) -> float:
     if boost_rounds <= 0:
         raise ValueError("boost_rounds must be strictly positive.")
-    normalized_depth = max_depth / 10.0
+    normalized_depth = max_depth / float(max_depth_normalizer)
     normalized_iteration = min(max(average_best_iteration / boost_rounds, 0.0), 1.0)
     return penalty_alpha * (0.5 * normalized_depth + 0.5 * normalized_iteration)
-
-
-def _compute_equal_weight_objective_base(
-    rmse: np.ndarray,
-    weights: np.ndarray,
-    window_std: np.ndarray,
-    *,
-    stability_penalty_alpha: float,
-    train_window_stability_alpha: float,
-) -> tuple[float, float, float, float]:
-    del weights
-    mean_rmse = float(rmse.mean())
-    std_rmse = float(np.sqrt(np.mean(np.square(rmse - mean_rmse))))
-    window_std_mean = float(window_std.mean())
-    objective_base_score = (
-        mean_rmse
-        + stability_penalty_alpha * std_rmse
-        + train_window_stability_alpha * window_std_mean
-    )
-    return (
-        mean_rmse,
-        std_rmse,
-        window_std_mean,
-        float(objective_base_score),
-    )
-
-
-def _bootstrap_objective_standard_error(
-    *,
-    rmse: np.ndarray,
-    weights: np.ndarray,
-    window_std: np.ndarray,
-    stability_penalty_alpha: float,
-    train_window_stability_alpha: float,
-    bootstrap_samples: int,
-    random_seed: int,
-) -> float:
-    if rmse.size <= 1 or bootstrap_samples <= 1:
-        return 0.0
-
-    rng = np.random.default_rng(random_seed)
-    fold_indices = np.arange(rmse.size, dtype=np.int64)
-    bootstrap_scores = np.empty(bootstrap_samples, dtype=np.float64)
-    for sample_index in range(bootstrap_samples):
-        sampled_indices = rng.choice(fold_indices, size=rmse.size, replace=True)
-        _, _, _, bootstrap_score = _compute_equal_weight_objective_base(
-            rmse[sampled_indices],
-            weights[sampled_indices],
-            window_std[sampled_indices],
-            stability_penalty_alpha=stability_penalty_alpha,
-            train_window_stability_alpha=train_window_stability_alpha,
-        )
-        bootstrap_scores[sample_index] = bootstrap_score
-    return float(bootstrap_scores.std(ddof=1))
-
-
-def aggregate_robust_objective(
-    *,
-    fold_rmse: list[float],
-    fold_weights: list[float],
-    fold_window_std: list[float],
-    stability_penalty_alpha: float,
-    train_window_stability_alpha: float,
-    complexity_penalty: float,
-    bootstrap_samples: int = 1024,
-    random_seed: int = 7,
-) -> dict[str, float]:
-    rmse = np.asarray(fold_rmse, dtype=np.float64)
-    weights = np.asarray(fold_weights, dtype=np.float64)
-    window_std = np.asarray(fold_window_std, dtype=np.float64)
-    if rmse.size == 0:
-        raise ValueError("At least one fold metric is required to aggregate the robust objective.")
-    if rmse.size != weights.size or rmse.size != window_std.size:
-        raise ValueError("fold_rmse, fold_weights, and fold_window_std must have the same length.")
-    if np.any(weights <= 0.0):
-        raise ValueError("All fold weights must be strictly positive.")
-    (
-        mean_rmse,
-        std_rmse,
-        window_std_mean,
-        objective_base_score,
-    ) = _compute_equal_weight_objective_base(
-        rmse,
-        weights,
-        window_std,
-        stability_penalty_alpha=stability_penalty_alpha,
-        train_window_stability_alpha=train_window_stability_alpha,
-    )
-    objective_standard_error = _bootstrap_objective_standard_error(
-        rmse=rmse,
-        weights=weights,
-        window_std=window_std,
-        stability_penalty_alpha=stability_penalty_alpha,
-        train_window_stability_alpha=train_window_stability_alpha,
-        bootstrap_samples=bootstrap_samples,
-        random_seed=random_seed,
-    )
-    objective_score = objective_base_score + complexity_penalty
-    return {
-        "mean_rmse": mean_rmse,
-        "std_rmse": std_rmse,
-        "window_std_mean": window_std_mean,
-        "objective_base_score": float(objective_base_score),
-        "objective_standard_error": objective_standard_error,
-        "objective_score": float(objective_score),
-        "normalized_weight_sum": 1.0,
-    }

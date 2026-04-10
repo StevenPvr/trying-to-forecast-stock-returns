@@ -174,7 +174,7 @@ def create_target_main_group(
     when ``execution_lag_days == 1`` and ``horizon_days == 5``.
 
     Net-of-cost columns match gross returns: cash-equity convention with no
-    broker round-trip model (legacy CFD fee plumbing removed).
+    broker round-trip model (CFD fee plumbing removed).
     """
     ticker_group: pd.DataFrame = group.sort_values(["ticker", "date"]).reset_index(drop=True).copy()
     if ticker_group.empty:

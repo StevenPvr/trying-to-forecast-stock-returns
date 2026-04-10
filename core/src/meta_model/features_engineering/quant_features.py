@@ -171,7 +171,7 @@ def add_quant_features_for_ticker(group: pd.DataFrame) -> pd.DataFrame:
     )
 
     for window in RETURN_WINDOWS:
-        group[f"{QUANT_FEATURE_PREFIX}momentum_{window}d"] = close_price.pct_change(window)
+        group[f"{QUANT_FEATURE_PREFIX}momentum_{window}d"] = _log_series(close_price).diff(window)
 
     for window in VOLATILITY_WINDOWS:
         realized_vol = _as_series(

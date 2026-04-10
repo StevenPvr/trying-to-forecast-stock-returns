@@ -12,6 +12,7 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.src.meta_model.broker_xtb.specs import BrokerSpecProvider, XtbInstrumentSpec
 from core.src.meta_model.features_engineering.high_level_features import (
     _compute_rsi_series,
     add_high_level_features,
@@ -58,11 +59,49 @@ def _write_earnings_reference(path: Path) -> None:
     ).to_csv(path, index=False)
 
 
+def _build_test_spec_provider() -> BrokerSpecProvider:
+    return BrokerSpecProvider(
+        specs=(
+            XtbInstrumentSpec(
+                symbol="AAA",
+                instrument_group="stock_cash",
+                currency="USD",
+                spread_bps=0.0,
+                slippage_bps=0.0,
+                long_swap_bps_daily=0.0,
+                short_swap_bps_daily=0.0,
+                margin_requirement=1.0,
+                max_adv_participation=0.05,
+                effective_from="2000-01-01",
+                fx_conversion_bps=0.0,
+            ),
+            XtbInstrumentSpec(
+                symbol="BBB",
+                instrument_group="stock_cash",
+                currency="USD",
+                spread_bps=0.0,
+                slippage_bps=0.0,
+                long_swap_bps_daily=0.0,
+                short_swap_bps_daily=0.0,
+                margin_requirement=1.0,
+                max_adv_participation=0.05,
+                effective_from="2000-01-01",
+                fx_conversion_bps=0.0,
+            ),
+        ),
+        fallback_to_defaults=False,
+    )
+
+
 def test_add_high_level_features_adds_expected_columns(tmp_path: Path) -> None:
     earnings_path = tmp_path / "earnings.csv"
     _write_earnings_reference(earnings_path)
 
-    enriched = add_high_level_features(_make_base_feature_dataset(), earnings_path=earnings_path)
+    enriched = add_high_level_features(
+        _make_base_feature_dataset(),
+        earnings_path=earnings_path,
+        spec_provider=_build_test_spec_provider(),
+    )
 
     expected_columns = {
         "xtb_expected_intraday_cost_rate",
@@ -99,7 +138,11 @@ def test_add_high_level_features_aligns_earnings_sessions(tmp_path: Path) -> Non
     ).to_csv(earnings_path, index=False)
     input_dataset = _make_base_feature_dataset(periods=6).loc[lambda frame: frame["ticker"] == "AAA"].reset_index(drop=True)
 
-    enriched = add_high_level_features(input_dataset, earnings_path=earnings_path)
+    enriched = add_high_level_features(
+        input_dataset,
+        earnings_path=earnings_path,
+        spec_provider=_build_test_spec_provider(),
+    )
     lookup = enriched.set_index("date")
 
     assert float(lookup.loc[pd.Timestamp("2024-01-03"), "earnings_days_to_next"]) == 1.0
@@ -122,7 +165,11 @@ def test_add_high_level_features_ignores_unknown_earnings_sessions(tmp_path: Pat
         lambda frame: frame["ticker"] == "AAA"
     ].reset_index(drop=True)
 
-    enriched = add_high_level_features(input_dataset, earnings_path=earnings_path)
+    enriched = add_high_level_features(
+        input_dataset,
+        earnings_path=earnings_path,
+        spec_provider=_build_test_spec_provider(),
+    )
 
     assert set(enriched["earnings_days_to_next"].unique()) == {252.0}
     assert set(enriched["earnings_days_since_last"].unique()) == {252.0}
@@ -132,7 +179,11 @@ def test_add_high_level_features_requires_earnings_reference(tmp_path: Path) -> 
     missing_path = tmp_path / "missing.csv"
 
     with pytest.raises(FileNotFoundError, match="Earnings reference CSV not found"):
-        add_high_level_features(_make_base_feature_dataset(periods=10), earnings_path=missing_path)
+        add_high_level_features(
+            _make_base_feature_dataset(periods=10),
+            earnings_path=missing_path,
+            spec_provider=_build_test_spec_provider(),
+        )
 
 
 def test_compute_rsi_series_handles_zero_loss_and_flat_windows() -> None:
@@ -171,7 +222,11 @@ def test_build_feature_dataset_includes_high_level_columns(tmp_path: Path) -> No
             )
     cleaned = pd.DataFrame(rows).sort_values(["date", "ticker"]).reset_index(drop=True)
 
-    featured = build_feature_dataset(cleaned, earnings_path=earnings_path)
+    featured = build_feature_dataset(
+        cleaned,
+        earnings_path=earnings_path,
+        spec_provider=_build_test_spec_provider(),
+    )
 
     assert "xtb_spread_to_realized_vol_21d" in featured.columns
     assert "sector_relative_gap_return" in featured.columns
@@ -187,7 +242,10 @@ def test_add_high_level_features_rebuilds_canonical_earnings_reference(tmp_path:
         "core.src.meta_model.features_engineering.high_level_features.ensure_earnings_history_output",
         return_value=earnings_path,
     ) as ensure_earnings:
-        add_high_level_features(_make_base_feature_dataset())
+        add_high_level_features(
+            _make_base_feature_dataset(),
+            spec_provider=_build_test_spec_provider(),
+        )
 
     ensure_earnings.assert_called_once()
 

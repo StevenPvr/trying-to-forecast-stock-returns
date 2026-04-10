@@ -33,6 +33,8 @@ class ManualOrderTicket:
 
     ticker: str
     side: str
+    share_count: int
+    reference_price_eur: float
     order_value_eur: float
     signal_rank: int
     predicted_return: float
@@ -56,6 +58,8 @@ def build_manual_execution_bundle(
     order_columns = [
         "ticker",
         "side",
+        "share_count",
+        "reference_price_eur",
         "order_value_eur",
         "signal_rank",
         "predicted_return",
@@ -69,6 +73,8 @@ def build_manual_execution_bundle(
         asdict(ManualOrderTicket(
             ticker=trade.ticker,
             side=trade.side,
+            share_count=trade.share_count,
+            reference_price_eur=trade.reference_price_eur,
             order_value_eur=trade.notional,
             signal_rank=trade.signal_rank,
             predicted_return=trade.predicted_return,

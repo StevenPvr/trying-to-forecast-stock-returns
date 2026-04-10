@@ -57,7 +57,7 @@ def build_train_only_selection_folds(
         folds.append(
             SelectionFold(
                 index=fold_index,
-                weight=float(fold_index),
+                weight=1.0,
                 train_indices=train_indices,
                 validation_indices=validation_indices,
                 train_end_date=pd.Timestamp(allowed_train_dates[-1]),

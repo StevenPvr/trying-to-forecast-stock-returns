@@ -16,6 +16,9 @@ from core.src.meta_model.data.paths import (
     EVALUATE_MODEL_LEADERBOARD_JSON,
     EVALUATE_OVERFITTING_REPORT_JSON,
     EVALUATE_POST_TRADE_RECONCILIATION_PARQUET,
+    EVALUATE_PORTFOLIO_OPTIMIZER_DAILY_PARQUET,
+    EVALUATE_PORTFOLIO_OPTIMIZER_SUMMARY_JSON,
+    EVALUATE_PORTFOLIO_TARGET_ALLOCATIONS_PARQUET,
     EVALUATE_BACKTEST_SUMMARY_JSON,
     EVALUATE_BACKTEST_TRADES_CSV,
     EVALUATE_BACKTEST_TRADES_PARQUET,
@@ -33,6 +36,9 @@ def save_evaluation_outputs(
     summary: dict[str, object],
     leaderboard: pd.DataFrame | None = None,
     overfitting_report: dict[str, object] | None = None,
+    portfolio_target_allocations: pd.DataFrame | None = None,
+    portfolio_optimizer_daily: pd.DataFrame | None = None,
+    portfolio_optimizer_summary: dict[str, object] | None = None,
 ) -> None:
     DATA_EVALUATE_DIR.mkdir(parents=True, exist_ok=True)
     predictions.to_parquet(EVALUATE_TEST_PREDICTIONS_PARQUET, index=False)
@@ -61,8 +67,17 @@ def save_evaluation_outputs(
             json.dumps(overfitting_report, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+    if portfolio_target_allocations is not None:
+        portfolio_target_allocations.to_parquet(EVALUATE_PORTFOLIO_TARGET_ALLOCATIONS_PARQUET, index=False)
+    if portfolio_optimizer_daily is not None:
+        portfolio_optimizer_daily.to_parquet(EVALUATE_PORTFOLIO_OPTIMIZER_DAILY_PARQUET, index=False)
+    if portfolio_optimizer_summary is not None:
+        EVALUATE_PORTFOLIO_OPTIMIZER_SUMMARY_JSON.write_text(
+            json.dumps(portfolio_optimizer_summary, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
     LOGGER.info(
-        "Saved evaluate outputs: %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
+        "Saved evaluate outputs: %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s",
         EVALUATE_TEST_PREDICTIONS_PARQUET,
         EVALUATE_TEST_PREDICTIONS_CSV,
         EVALUATE_BACKTEST_TRADES_PARQUET,
@@ -75,4 +90,7 @@ def save_evaluation_outputs(
         EVALUATE_MANUAL_WATCHLIST_CSV,
         EVALUATE_EXECUTION_CHECKLIST_JSON,
         EVALUATE_POST_TRADE_RECONCILIATION_PARQUET,
+        EVALUATE_PORTFOLIO_TARGET_ALLOCATIONS_PARQUET,
+        EVALUATE_PORTFOLIO_OPTIMIZER_DAILY_PARQUET,
+        EVALUATE_PORTFOLIO_OPTIMIZER_SUMMARY_JSON,
     )

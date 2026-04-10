@@ -144,6 +144,7 @@ def _build_subset_score(feature_names: list[str]) -> SubsetEconomicScore:
         lower_quartile_fold_net_pnl=objective,
         is_valid=objective > 0.0,
         fold_scores=fold_scores,
+        pnl_positive_fold_share=1.0 if objective > 0.0 else 0.0,
         weighted_daily_rank_ic_mean=objective,
         weighted_daily_rank_ic_ir=objective,
         weighted_daily_top_bottom_spread_mean=max(objective, 0.0),

@@ -15,10 +15,14 @@ import pandas as pd
 from core.src.meta_model.data.constants import (
     DEFAULT_END_DATE,
     DEFAULT_START_DATE,
+    FRED_DAILY_MAX_STALENESS_SESSIONS,
     FRED_DAILY_SERIES,
+    FRED_MONTHLY_MAX_STALENESS_SESSIONS,
     FRED_MONTHLY_SERIES,
+    FRED_QUARTERLY_MAX_STALENESS_SESSIONS,
     FRED_QUARTERLY_SERIES,
     FRED_RATE_LIMIT_SLEEP,
+    FRED_WEEKLY_MAX_STALENESS_SESSIONS,
     FRED_WEEKLY_SERIES,
     MAX_RETRIES,
     RANDOM_SEED,
@@ -184,7 +188,8 @@ def _build_macro_dataframe(
             sessions,
             _series_lag_sessions(series_id),
         )
-        aligned: pd.Series = aligned_source.reindex(sessions).ffill()  # type: ignore[type-arg]
+        staleness_limit: int = _series_max_staleness_sessions(series_id)
+        aligned: pd.Series = aligned_source.reindex(sessions).ffill(limit=staleness_limit)  # type: ignore[type-arg]
         df[col_name] = aligned
     df = df.reset_index()
     df["date"] = pd.to_datetime(df["date"])
@@ -201,6 +206,19 @@ def _series_lag_sessions(series_id: str) -> int:
     if series_id in FRED_QUARTERLY_SERIES:
         return _QUARTERLY_SERIES_LAG_SESSIONS
     return _DAILY_SERIES_LAG_SESSIONS
+
+
+def _series_max_staleness_sessions(series_id: str) -> int:
+    """Return the maximum number of sessions a series may be forward-filled."""
+    if series_id in FRED_DAILY_SERIES:
+        return FRED_DAILY_MAX_STALENESS_SESSIONS
+    if series_id in FRED_WEEKLY_SERIES:
+        return FRED_WEEKLY_MAX_STALENESS_SESSIONS
+    if series_id in FRED_MONTHLY_SERIES:
+        return FRED_MONTHLY_MAX_STALENESS_SESSIONS
+    if series_id in FRED_QUARTERLY_SERIES:
+        return FRED_QUARTERLY_MAX_STALENESS_SESSIONS
+    return FRED_DAILY_MAX_STALENESS_SESSIONS
 
 
 def build_macro_dataset(config: MacroConfig) -> pd.DataFrame:

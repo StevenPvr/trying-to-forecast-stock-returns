@@ -45,34 +45,54 @@ def build_walk_forward_folds(
     validation_mask = ordered[SPLIT_COLUMN] == VAL_SPLIT_NAME
     if not train_mask.any():
         raise ValueError("Optimization dataset does not contain any train rows.")
-    if not validation_mask.any():
-        raise ValueError("Optimization dataset does not contain any validation rows.")
-
-    validation_dates = pd.Index(pd.to_datetime(ordered.loc[validation_mask, DATE_COLUMN]).drop_duplicates())
-    validation_date_chunks = [
-        list(chunk.tolist())
-        for chunk in np.array_split(validation_dates.to_numpy(), fold_count)
-        if len(chunk) > 0
-    ]
-    if len(validation_date_chunks) != fold_count:
-        raise ValueError(
-            f"Unable to create {fold_count} non-empty validation folds from {len(validation_dates)} dates.",
+    if validation_mask.any():
+        validation_dates = pd.Index(
+            pd.to_datetime(ordered.loc[validation_mask, DATE_COLUMN]).drop_duplicates(),
         )
+        validation_date_chunks = [
+            list(chunk.tolist())
+            for chunk in np.array_split(validation_dates.to_numpy(), fold_count)
+            if len(chunk) > 0
+        ]
+        if len(validation_date_chunks) != fold_count:
+            raise ValueError(
+                f"Unable to create {fold_count} non-empty validation folds from {len(validation_dates)} dates.",
+            )
+    else:
+        # Train-only mode: derive internal validation blocks directly from train dates.
+        train_dates = pd.Index(
+            pd.to_datetime(ordered.loc[train_mask, DATE_COLUMN]).drop_duplicates().sort_values(),
+        )
+        validation_date_chunks = [
+            list(chunk.tolist())
+            for chunk in np.array_split(train_dates.to_numpy(), fold_count)
+            if len(chunk) > 0
+        ]
+        if len(validation_date_chunks) != fold_count:
+            raise ValueError(
+                f"Unable to create {fold_count} non-empty train-only folds from {len(train_dates)} dates.",
+            )
 
     folds: list[WalkForwardFold] = []
     for fold_index, validation_dates_chunk in enumerate(validation_date_chunks, start=1):
         validation_start = pd.Timestamp(validation_dates_chunk[0])
         validation_end = pd.Timestamp(validation_dates_chunk[-1])
-        expanding_train_mask = train_mask | (
-            validation_mask & (ordered[DATE_COLUMN] < validation_start)
-        )
+        if validation_mask.any():
+            expanding_train_mask = train_mask | (
+                validation_mask & (ordered[DATE_COLUMN] < validation_start)
+            )
+        else:
+            expanding_train_mask = train_mask & (ordered[DATE_COLUMN] < validation_start)
         if target_horizon_days > 0:
             train_candidate_dates = pd.Index(
                 pd.to_datetime(ordered.loc[expanding_train_mask, DATE_COLUMN]).drop_duplicates().sort_values(),
             )
             embargoed_dates = train_candidate_dates[-target_horizon_days:].tolist()
             expanding_train_mask = expanding_train_mask & ~ordered[DATE_COLUMN].isin(embargoed_dates)
-        fold_validation_mask = validation_mask & ordered[DATE_COLUMN].isin(validation_dates_chunk)
+        if validation_mask.any():
+            fold_validation_mask = validation_mask & ordered[DATE_COLUMN].isin(validation_dates_chunk)
+        else:
+            fold_validation_mask = train_mask & ordered[DATE_COLUMN].isin(validation_dates_chunk)
         train_indices = np.flatnonzero(expanding_train_mask.to_numpy())
         validation_indices = np.flatnonzero(fold_validation_mask.to_numpy())
         if train_indices.size == 0 or validation_indices.size == 0:
@@ -81,7 +101,7 @@ def build_walk_forward_folds(
         folds.append(
             WalkForwardFold(
                 index=fold_index,
-                weight=float(fold_index),
+                weight=1.0,
                 train_indices=train_indices,
                 validation_indices=validation_indices,
                 train_end_date=train_end_date,

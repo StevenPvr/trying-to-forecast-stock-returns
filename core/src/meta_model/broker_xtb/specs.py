@@ -54,12 +54,12 @@ class XtbInstrumentSpec:
 class BrokerSpecProvider:
     """Registry that resolves instrument specifications by symbol and date.
 
-    Supports fallback to default stock specifications when explicit entries
-    are not available.
+    Resolves explicit per-symbol specifications without silently changing
+    trading behavior.
     """
 
     specs: tuple[XtbInstrumentSpec, ...]
-    fallback_to_defaults: bool = True
+    fallback_to_defaults: bool = False
     _specs_by_symbol: dict[str, tuple[XtbInstrumentSpec, ...]] = field(init=False, repr=False)
     _default_stock_spec: XtbInstrumentSpec = field(init=False, repr=False)
 
@@ -169,7 +169,7 @@ def _build_default_specs() -> tuple[XtbInstrumentSpec, ...]:
 def load_instrument_specs(
     path: Path = XTB_INSTRUMENT_SPECS_REFERENCE_JSON,
     *,
-    allow_defaults_if_missing: bool = True,
+    allow_defaults_if_missing: bool = False,
 ) -> tuple[XtbInstrumentSpec, ...]:
     """Load instrument specifications from a JSON snapshot.
 
@@ -204,8 +204,8 @@ def load_instrument_specs(
 def build_default_spec_provider(
     path: Path = XTB_INSTRUMENT_SPECS_REFERENCE_JSON,
     *,
-    allow_defaults_if_missing: bool = True,
-    require_explicit_symbols: bool = False,
+    allow_defaults_if_missing: bool = False,
+    require_explicit_symbols: bool = True,
 ) -> BrokerSpecProvider:
     """Build a provider from disk, optionally enforcing explicit symbols."""
     provider = BrokerSpecProvider(

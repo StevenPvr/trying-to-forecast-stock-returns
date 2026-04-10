@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from core.src.meta_model.broker_xtb.specs import BrokerSpecProvider
 from core.src.meta_model.data.paths import REFERENCE_EARNINGS_HISTORY_CSV
 from core.src.meta_model.features_engineering.config import (
     DEEP_FEATURE_PREFIX,
@@ -85,6 +86,7 @@ def build_feature_dataset(
     max_workers: int | None = None,
     *,
     earnings_path: Path = REFERENCE_EARNINGS_HISTORY_CSV,
+    spec_provider: BrokerSpecProvider | None = None,
 ) -> pd.DataFrame:
     validate_base_columns(df)
     prepared: pd.DataFrame = prepare_input_dataset(df)
@@ -97,7 +99,11 @@ def build_feature_dataset(
     enriched = add_universe_market_features(enriched)
     enriched = add_cross_sectional_features(enriched)
     enriched = add_calendar_features(enriched)
-    enriched = add_high_level_features(enriched, earnings_path=earnings_path)
+    enriched = add_high_level_features(
+        enriched,
+        earnings_path=earnings_path,
+        spec_provider=spec_provider,
+    )
     enriched = drop_internal_columns(enriched)
     enriched = enriched.sort_values(["date", "ticker"]).reset_index(drop=True)
 

@@ -11,6 +11,7 @@ import pandas as pd
 
 from core.src.meta_model.features_engineering.config import (
     CROSS_SECTIONAL_BASE_FEATURES,
+    CROSS_SECTIONAL_ZSCORE_CLIP,
     INTERNAL_FEATURE_PREFIX,
     MARKET_WINDOWS,
     QUANT_FEATURE_PREFIX,
@@ -236,7 +237,7 @@ def add_cross_sectional_features(data: pd.DataFrame) -> pd.DataFrame:
         enriched[f"{QUANT_FEATURE_PREFIX}cs_zscore_{feature_slug}"] = _as_series(
             safe_divide(feature_values - mean_by_date, std_by_date),
             enriched.index,
-        )
+        ).clip(-CROSS_SECTIONAL_ZSCORE_CLIP, CROSS_SECTIONAL_ZSCORE_CLIP)
 
     return enriched
 
@@ -255,10 +256,29 @@ def add_calendar_features(data: pd.DataFrame) -> pd.DataFrame:
     _add_cyclical_time_feature(enriched, "month_of_year", month_of_year, 12.0)
     _add_cyclical_time_feature(enriched, "day_of_month", day_of_month, 31.0)
     _add_cyclical_time_feature(enriched, "day_of_year", day_of_year, 366.0)
-    enriched[f"{QUANT_FEATURE_PREFIX}is_month_start"] = dates.dt.is_month_start.astype(int)
-    enriched[f"{QUANT_FEATURE_PREFIX}is_month_end"] = dates.dt.is_month_end.astype(int)
-    enriched[f"{QUANT_FEATURE_PREFIX}is_quarter_start"] = dates.dt.is_quarter_start.astype(int)
-    enriched[f"{QUANT_FEATURE_PREFIX}is_quarter_end"] = dates.dt.is_quarter_end.astype(int)
+    unique_dates: pd.Series = dates.drop_duplicates().sort_values()
+    unique_months: pd.Series = unique_dates.dt.to_period("M")
+    unique_quarters: pd.Series = unique_dates.dt.to_period("Q")
+    month_start_map: pd.Series = pd.Series(
+        (unique_months != unique_months.shift(1)).astype(int).values,
+        index=unique_dates.values,
+    )
+    month_end_map: pd.Series = pd.Series(
+        (unique_months != unique_months.shift(-1)).astype(int).values,
+        index=unique_dates.values,
+    )
+    quarter_start_map: pd.Series = pd.Series(
+        (unique_quarters != unique_quarters.shift(1)).astype(int).values,
+        index=unique_dates.values,
+    )
+    quarter_end_map: pd.Series = pd.Series(
+        (unique_quarters != unique_quarters.shift(-1)).astype(int).values,
+        index=unique_dates.values,
+    )
+    enriched[f"{QUANT_FEATURE_PREFIX}is_month_start"] = dates.map(month_start_map).fillna(0).astype(int)
+    enriched[f"{QUANT_FEATURE_PREFIX}is_month_end"] = dates.map(month_end_map).fillna(0).astype(int)
+    enriched[f"{QUANT_FEATURE_PREFIX}is_quarter_start"] = dates.map(quarter_start_map).fillna(0).astype(int)
+    enriched[f"{QUANT_FEATURE_PREFIX}is_quarter_end"] = dates.map(quarter_end_map).fillna(0).astype(int)
 
     return enriched
 

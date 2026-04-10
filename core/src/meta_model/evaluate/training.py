@@ -18,10 +18,12 @@ from core.src.meta_model.model_contract import (
     SIGNAL_DATE_COLUMN,
     SPLIT_COLUMN,
     TEST_SPLIT_NAME,
+    TRAIN_SPLIT_NAME,
     TICKER_COLUMN,
 )
 from core.src.meta_model.optimize_parameters.search_space import load_xgboost_module
 from core.src.meta_model.xgboost_dmatrix import build_xgboost_dmatrix, prepare_xgboost_feature_frame
+from core.src.meta_model.split_guard import assert_train_only_fit_frame
 
 
 def _format_duration(seconds: float) -> str:
@@ -350,6 +352,69 @@ def iter_model_prediction_days(
             pd.Timestamp(prediction_date).date(),
             execution_date.date(),
             len(available_training_frame),
+            len(prediction_frame),
+            _format_duration(elapsed_seconds),
+            average_seconds,
+            _format_duration(eta_seconds),
+        )
+        yield predicted_frame
+
+
+def _resolve_train_and_test_frames(data: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ordered = data.sort_values([DATE_COLUMN, TICKER_COLUMN]).reset_index(drop=True)
+    train_frame = pd.DataFrame(ordered.loc[ordered[SPLIT_COLUMN] == TRAIN_SPLIT_NAME].copy())
+    test_frame = pd.DataFrame(ordered.loc[ordered[SPLIT_COLUMN] == TEST_SPLIT_NAME].copy())
+    if train_frame.empty:
+        raise ValueError("No train rows available for frozen_train_only evaluation mode.")
+    if test_frame.empty:
+        raise ValueError("No test rows available for frozen_train_only evaluation mode.")
+    assert_train_only_fit_frame(train_frame, context="evaluate.training.frozen_train_only")
+    return train_frame.reset_index(drop=True), test_frame.reset_index(drop=True)
+
+
+def iter_model_prediction_days_frozen_train_only(
+    data: pd.DataFrame,
+    feature_columns: list[str],
+    model_spec: ModelSpec,
+    *,
+    execution_lag_days: int,
+    logger: Any,
+) -> Iterator[pd.DataFrame]:
+    """Yield prediction days with a single model fit on the train split only."""
+    train_frame, test_frame = _resolve_train_and_test_frames(data)
+    artifact = fit_model(model_spec, train_frame, feature_columns)
+    test_dates = pd.Index(pd.to_datetime(test_frame[DATE_COLUMN]).drop_duplicates().sort_values())
+    started_at = time.perf_counter()
+    for date_index, prediction_date in enumerate(test_dates, start=1):
+        execution_date = _resolve_execution_date(
+            pd.Timestamp(prediction_date),
+            test_dates,
+            execution_lag_days,
+        )
+        if execution_date is None:
+            continue
+        prediction_frame = pd.DataFrame(
+            test_frame.loc[test_frame[DATE_COLUMN] == prediction_date].copy(),
+        )
+        predictions = predict_model(artifact, prediction_frame, feature_columns)
+        predicted_frame = predict_test_frame_from_values(
+            prediction_frame,
+            predictions,
+            execution_date=execution_date,
+        )
+        elapsed_seconds = time.perf_counter() - started_at
+        average_seconds = elapsed_seconds / date_index
+        remaining_dates = len(test_dates) - date_index
+        eta_seconds = average_seconds * remaining_dates
+        logger.info(
+            "Frozen train-only predict [%s]: %d/%d test dates (%.2f%%) | signal_date=%s | execution_date=%s | train_rows=%d | predict_rows=%d | elapsed=%s | avg/date=%.2fs | eta=%s",
+            model_spec.model_name,
+            date_index,
+            len(test_dates),
+            100.0 * date_index / len(test_dates),
+            pd.Timestamp(prediction_date).date(),
+            execution_date.date(),
+            len(train_frame),
             len(prediction_frame),
             _format_duration(elapsed_seconds),
             average_seconds,

@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable, TypedDict
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -17,21 +17,18 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.src.meta_model.data.paths import (
-    FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
-    OPTIMIZATION_OVERFITTING_REPORT_JSON,
-    OPTIMIZATION_TRIAL_LEDGER_CSV,
-    OPTIMIZATION_TRIAL_LEDGER_PARQUET,
-    XGBOOST_OPTUNA_BEST_PARAMS_JSON,
-    XGBOOST_OPTUNA_TRIALS_CSV,
-    XGBOOST_OPTUNA_TRIALS_PARQUET,
-)
+from core.src.meta_model.data.paths import FEATURE_SELECTION_FILTERED_DATASET_PARQUET
 from core.src.meta_model.overfitting import estimate_probability_of_backtest_overfitting
 from core.src.meta_model.optimize_parameters.acceleration import (
     AccelerationPlan,
     resolve_acceleration_plan,
 )
-from core.src.meta_model.optimize_parameters.config import OptimizationConfig, OPTUNA_STUDY_NAME
+from core.src.meta_model.optimize_parameters.config import (
+    OptimizationConfig,
+    OPTUNA_STUDY_NAME,
+    TRAIN_SPLIT_NAME,
+    VAL_SPLIT_NAME,
+)
 from core.src.meta_model.optimize_parameters.cv import WalkForwardFold, build_walk_forward_folds
 from core.src.meta_model.optimize_parameters.dataset import (
     OptimizationDatasetBundle,
@@ -47,7 +44,11 @@ from core.src.meta_model.optimize_parameters.fold_context import (
     FoldEvaluationContext,
     build_fold_evaluation_contexts,
 )
-from core.src.meta_model.optimize_parameters.io import save_optimization_outputs
+from core.src.meta_model.optimize_parameters.io import (
+    OverfittingReportPayload,
+    SaveOutputsFn,
+    resolve_save_outputs_fn,
+)
 from core.src.meta_model.optimize_parameters.metric_context import (
     compute_mean_daily_rank_ic_from_context,
 )
@@ -71,16 +72,6 @@ _process_fold_dataset_bundle: OptimizationDatasetBundle | None = None
 _process_fold_booster_params: dict[str, Any] | None = None
 _process_fold_optimization_config: OptimizationConfig | None = None
 _process_fold_matrix_cache_by_index: dict[int, CachedFoldMatrixBundle] | None = None
-
-
-class OverfittingReportPayload(TypedDict):
-    trial_count: int
-    pbo: float
-    selected_trial_number: int
-    selected_trial_objective_score: float
-
-
-SaveOutputsFn = Callable[[pd.DataFrame, dict[str, Any], OverfittingReportPayload], None]
 
 
 def _format_duration(seconds: float) -> str:
@@ -481,100 +472,6 @@ def _study_to_frame(study: Any) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("trial_number").reset_index(drop=True)
 
 
-def _build_default_save_outputs_fn(
-    *,
-    trials_parquet_path: Path | None,
-    trials_csv_path: Path | None,
-    best_params_path: Path | None,
-) -> SaveOutputsFn:
-    def save_outputs(
-        trials_frame: pd.DataFrame,
-        best_payload: dict[str, Any],
-        overfitting_report: OverfittingReportPayload,
-    ) -> None:
-        if (
-            trials_parquet_path is None
-            and trials_csv_path is None
-            and best_params_path is None
-        ):
-            _save_outputs_with_default_paths(trials_frame, best_payload, overfitting_report)
-            return
-        _save_outputs_with_custom_paths(
-            trials_frame,
-            best_payload,
-            overfitting_report,
-            trials_parquet_path=trials_parquet_path or XGBOOST_OPTUNA_TRIALS_PARQUET,
-            trials_csv_path=trials_csv_path or XGBOOST_OPTUNA_TRIALS_CSV,
-            best_params_path=best_params_path or XGBOOST_OPTUNA_BEST_PARAMS_JSON,
-        )
-
-    return save_outputs
-
-
-def _save_outputs_with_default_paths(
-    trials_frame: pd.DataFrame,
-    best_payload: dict[str, Any],
-    overfitting_report: OverfittingReportPayload,
-) -> None:
-    serialized_overfitting_report: dict[str, Any] = dict(overfitting_report)
-    try:
-        save_optimization_outputs(
-            trials_frame,
-            best_payload,
-            serialized_overfitting_report,
-        )
-    except TypeError:
-        save_optimization_outputs(trials_frame, best_payload)
-
-
-def _save_outputs_with_custom_paths(
-    trials_frame: pd.DataFrame,
-    best_payload: dict[str, Any],
-    overfitting_report: OverfittingReportPayload,
-    *,
-    trials_parquet_path: Path,
-    trials_csv_path: Path,
-    best_params_path: Path,
-) -> None:
-    serialized_overfitting_report: dict[str, Any] = dict(overfitting_report)
-    try:
-        save_optimization_outputs(
-            trials_frame,
-            best_payload,
-            serialized_overfitting_report,
-            trials_parquet_path=trials_parquet_path,
-            trials_csv_path=trials_csv_path,
-            best_params_path=best_params_path,
-            trial_ledger_parquet_path=OPTIMIZATION_TRIAL_LEDGER_PARQUET,
-            trial_ledger_csv_path=OPTIMIZATION_TRIAL_LEDGER_CSV,
-            overfitting_report_path=OPTIMIZATION_OVERFITTING_REPORT_JSON,
-        )
-    except TypeError:
-        save_optimization_outputs(
-            trials_frame,
-            best_payload,
-            trials_parquet_path=trials_parquet_path,
-            trials_csv_path=trials_csv_path,
-            best_params_path=best_params_path,
-        )
-
-
-def _resolve_save_outputs_fn(
-    save_outputs_fn: SaveOutputsFn | None,
-    *,
-    trials_parquet_path: Path | None,
-    trials_csv_path: Path | None,
-    best_params_path: Path | None,
-) -> SaveOutputsFn:
-    if save_outputs_fn is not None:
-        return save_outputs_fn
-    return _build_default_save_outputs_fn(
-        trials_parquet_path=trials_parquet_path,
-        trials_csv_path=trials_csv_path,
-        best_params_path=best_params_path,
-    )
-
-
 def _load_dataset_bundle_with_plan(
     dataset_path: Path,
     config: OptimizationConfig,
@@ -586,7 +483,10 @@ def _load_dataset_bundle_with_plan(
     list[FoldEvaluationContext],
     ParallelismPlan,
 ]:
-    data = load_preprocessed_dataset(dataset_path)
+    data = load_preprocessed_dataset(
+        dataset_path,
+        allowed_splits=(TRAIN_SPLIT_NAME, VAL_SPLIT_NAME),
+    )
     dataset_bundle = build_optimization_dataset_bundle(data, dataset_path)
     del data
     feature_columns = dataset_bundle.feature_columns
@@ -753,7 +653,7 @@ def optimize_xgboost_parameters(
     config = optimization_config or OptimizationConfig()
     xgb_module = load_xgboost_module()
     acceleration_plan = resolve_acceleration_plan(config, xgb_module=xgb_module)
-    save_outputs = _resolve_save_outputs_fn(
+    save_outputs = resolve_save_outputs_fn(
         save_outputs_fn,
         trials_parquet_path=trials_parquet_path,
         trials_csv_path=trials_csv_path,

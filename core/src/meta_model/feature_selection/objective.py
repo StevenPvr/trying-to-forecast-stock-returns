@@ -39,6 +39,7 @@ class SubsetEconomicScore:
     lower_quartile_fold_net_pnl: float
     is_valid: bool
     fold_scores: tuple[FoldEconomicScore, ...]
+    pnl_positive_fold_share: float = 0.0
     weighted_daily_rank_ic_mean: float = 0.0
     weighted_daily_rank_ic_ir: float = 0.0
     weighted_daily_top_bottom_spread_mean: float = 0.0
@@ -88,6 +89,7 @@ def aggregate_subset_score(
         lower_quartile_fold_net_pnl=float(np.quantile(fold_net_pnl, 0.25)),
         is_valid=weighted_rank_ic_mean > 0.0,
         fold_scores=tuple(fold_scores),
+        pnl_positive_fold_share=float(np.mean(fold_net_pnl > 0.0)),
         weighted_daily_rank_ic_mean=weighted_rank_ic_mean,
         weighted_daily_rank_ic_ir=_weighted_mean(fold_rank_ic_ir, weights),
         weighted_daily_top_bottom_spread_mean=_weighted_mean(fold_top_bottom_spread, weights),
@@ -139,13 +141,13 @@ def _exceeds_null_improvement(
     if np.allclose(fold_deltas, 0.0):
         return False
     centered_deltas = fold_deltas - float(fold_deltas.mean())
-    rng = np.random.default_rng(7)
-    null_scores: list[float] = []
-    for _ in range(bootstrap_count):
+    seed_value = hash(tuple(fold_deltas.tolist())) & 0xFFFF_FFFF
+    rng = np.random.default_rng(seed_value)
+    null_scores = np.empty(bootstrap_count, dtype=np.float64)
+    for i in range(bootstrap_count):
         signs = rng.choice(np.asarray([-1.0, 1.0], dtype=np.float64), size=centered_deltas.size)
-        null_scores.append(float(np.mean(centered_deltas * signs)))
-    null_score_array = np.asarray(null_scores, dtype=np.float64)
-    return observed_improvement > float(np.quantile(null_score_array, 0.95))
+        null_scores[i] = float(np.mean(centered_deltas * signs))
+    return observed_improvement > float(np.quantile(null_scores, 0.95))
 
 
 def passes_selection_gates(
@@ -158,6 +160,7 @@ def passes_selection_gates(
         and candidate_score.weighted_daily_rank_ic_ir > 0.0
         and candidate_score.weighted_daily_top_bottom_spread_mean > 0.0
         and candidate_score.positive_fold_share >= config.positive_fold_share_min
+        and candidate_score.pnl_positive_fold_share >= config.pnl_positive_fold_share_min
         and candidate_score.lower_quartile_fold_net_pnl >= config.lower_quartile_fold_pnl_floor
     )
 

@@ -121,18 +121,18 @@ def _make_mock_selection_result() -> RobustFeatureSelectionResult:
 
 
 class TestFeatureSelection:
-    def test_feature_selection_config_defaults_to_all_detected_cores(
+    def test_feature_selection_config_caps_default_parallel_workers_at_32(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "core.src.meta_model.runtime_parallelism.os.cpu_count",
-            lambda: 9,
+            lambda: 64,
         )
 
         config = SelectionConfig()
 
-        assert config.parallel_workers == 9
+        assert config.parallel_workers == 32
         assert config.selected_feature_count == 30
 
     def test_build_selection_feature_columns_excludes_targets_and_metadata(self) -> None:

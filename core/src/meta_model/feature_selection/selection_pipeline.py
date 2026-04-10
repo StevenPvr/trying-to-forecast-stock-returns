@@ -15,9 +15,10 @@ from core.src.meta_model.feature_selection.correlation import (
     run_target_distance_correlation_filter,
 )
 from core.src.meta_model.feature_selection.cv import SelectionFold
-from core.src.meta_model.feature_selection.grouping import build_feature_buckets
+from core.src.meta_model.feature_selection.grouping import build_feature_buckets, build_feature_groups
 from core.src.meta_model.feature_selection.scoring import BacktestFeatureSubsetScorer
 from core.src.meta_model.feature_selection.sfi import build_sfi_score_frame
+from core.src.meta_model.feature_selection.wrapper_search import search_feature_groups
 
 """End-to-end robust feature selection: SFI → pruning → wrapper search → cap at top-N."""
 
@@ -35,6 +36,7 @@ class RobustFeatureSelectionResult:
     distance_correlation_audit: pd.DataFrame
     target_correlation_audit: pd.DataFrame
     summary: dict[str, object]
+    wrapper_search_history: pd.DataFrame | None = None
 
 
 def run_robust_feature_selection(
@@ -49,7 +51,7 @@ def run_robust_feature_selection(
         len(folds),
     )
     stage_start = time.perf_counter()
-    group_manifest = build_group_manifest(feature_names)
+    group_manifest: pd.DataFrame = build_group_manifest(feature_names)
     scorer = BacktestFeatureSubsetScorer(cache, folds, config)
     sfi_scores = build_sfi_score_frame(cache, feature_names, scorer, config)
     _log_sfi_stage_summary(sfi_scores)
@@ -76,19 +78,37 @@ def run_robust_feature_selection(
     )
     _log_survivor_preview("target correlation filter", target_survivors)
     LOGGER.info("Feature selection stage timing | stage=target_correlation_filter | elapsed=%.2fs", time.perf_counter() - stage_start)
-    final_selected_names = build_final_candidate_feature_names(
-        sfi_scores,
-        target_survivors,
-        max_selected_features=config.selected_feature_count,
-    )
-    if len(final_selected_names) != len(target_survivors):
-        LOGGER.info(
-            "Feature selection broker feature rescue: target_survivors=%d | final_candidates=%d | rescued=%d | preview=%s",
-            len(target_survivors),
-            len(final_selected_names),
-            len(final_selected_names) - len(target_survivors),
-            ", ".join([n for n in final_selected_names if n not in set(target_survivors)][:5]) or "none",
+    stage_start = time.perf_counter()
+    wrapper_search_history: pd.DataFrame | None = None
+    if target_survivors:
+        groups, group_manifest = build_feature_groups(
+            cache,
+            target_survivors,
+            sample_size=config.group_sample_size,
+            max_group_size=config.max_group_size,
+            parallel_workers=config.parallel_workers,
         )
+        wrapper_result = search_feature_groups(
+            root_groups=groups,
+            scorer=scorer,
+            config=config,
+            estimated_row_count=cache.train_row_count,
+        )
+        wrapper_selected = wrapper_result.selected_feature_names
+        wrapper_search_history = pd.DataFrame(wrapper_result.search_history)
+        LOGGER.info(
+            "Feature selection wrapper search completed: wrapper_selected=%d | objective=%.6f",
+            len(wrapper_selected),
+            wrapper_result.best_score.objective_score,
+        )
+        final_selected_names = build_final_candidate_feature_names(
+            sfi_scores,
+            wrapper_selected if wrapper_selected else target_survivors,
+            max_selected_features=config.selected_feature_count,
+        )
+    else:
+        final_selected_names = []
+    LOGGER.info("Feature selection stage timing | stage=wrapper_search | elapsed=%.2fs", time.perf_counter() - stage_start)
     _log_final_selection_summary(sfi_scores, final_selected_names)
     score_frame = build_feature_score_report(
         sfi_scores,
@@ -123,6 +143,7 @@ def run_robust_feature_selection(
         distance_correlation_audit=distance_audit,
         target_correlation_audit=target_audit,
         summary=summary,
+        wrapper_search_history=wrapper_search_history,
     )
 
 

@@ -153,6 +153,57 @@ OPTIMIZATION_OVERFITTING_REPORT_JSON: Path = (
     DATA_OPTIMIZE_PARAMETERS_DIR / "overfitting_report.json"
 )
 
+# --- Meta Labeling ---
+DATA_META_LABELING_DIR: Path = DATA_DIR / "meta_labeling"
+META_PRIMARY_OOS_TRAIN_TAIL_PARQUET: Path = (
+    DATA_META_LABELING_DIR / "primary_oos_panel_train_tail.parquet"
+)
+META_PRIMARY_OOS_VAL_PARQUET: Path = (
+    DATA_META_LABELING_DIR / "primary_oos_panel_val.parquet"
+)
+META_TRAIN_OOF_PREDICTIONS_PARQUET: Path = (
+    DATA_META_LABELING_DIR / "meta_train_oof_predictions.parquet"
+)
+META_VAL_PREDICTIONS_PARQUET: Path = (
+    DATA_META_LABELING_DIR / "meta_val_predictions.parquet"
+)
+META_BEST_PARAMS_JSON: Path = DATA_META_LABELING_DIR / "meta_best_params.json"
+META_TRIAL_LEDGER_PARQUET: Path = DATA_META_LABELING_DIR / "meta_trial_ledger.parquet"
+META_MODEL_JSON: Path = DATA_META_LABELING_DIR / "meta_model.json"
+META_STAGE_SUMMARY_JSON: Path = DATA_META_LABELING_DIR / "meta_stage_summary.json"
+META_ABLATION_SCREEN_PARQUET: Path = DATA_META_LABELING_DIR / "ablation_screen_results.parquet"
+META_ABLATION_CONFIRM_PARQUET: Path = DATA_META_LABELING_DIR / "ablation_confirm_results.parquet"
+
+# --- Portfolio Optimization ---
+DATA_PORTFOLIO_OPTIMIZATION_DIR: Path = DATA_DIR / "portfolio_optimization"
+PORTFOLIO_BEST_PARAMS_JSON: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "portfolio_best_params.json"
+)
+PORTFOLIO_TRIAL_LEDGER_PARQUET: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "portfolio_trial_ledger.parquet"
+)
+PORTFOLIO_TRAIN_CV_DAILY_PARQUET: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "portfolio_train_cv_daily.parquet"
+)
+PORTFOLIO_TRAIN_CV_ALLOCATIONS_PARQUET: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "portfolio_train_cv_allocations.parquet"
+)
+PORTFOLIO_VALIDATION_DAILY_PARQUET: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "portfolio_validation_daily.parquet"
+)
+PORTFOLIO_VALIDATION_ALLOCATIONS_PARQUET: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "portfolio_validation_allocations.parquet"
+)
+PORTFOLIO_VALIDATION_SUMMARY_JSON: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "portfolio_validation_summary.json"
+)
+PORTFOLIO_ALPHA_CALIBRATION_AUDIT_PARQUET: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "alpha_calibration_audit.parquet"
+)
+PORTFOLIO_RISK_COVARIANCE_PARQUET: Path = (
+    DATA_PORTFOLIO_OPTIMIZATION_DIR / "risk_covariance.parquet"
+)
+
 # --- Broker XTB ---
 DATA_BROKER_XTB_DIR: Path = DATA_DIR / "broker_xtb"
 XTB_TRADABLE_UNIVERSE_PARQUET: Path = (
@@ -207,4 +258,13 @@ EVALUATE_POST_TRADE_RECONCILIATION_PARQUET: Path = (
 )
 EVALUATE_OVERFITTING_REPORT_JSON: Path = (
     DATA_EVALUATE_DIR / "overfitting_report.json"
+)
+EVALUATE_PORTFOLIO_TARGET_ALLOCATIONS_PARQUET: Path = (
+    DATA_EVALUATE_DIR / "portfolio_target_allocations.parquet"
+)
+EVALUATE_PORTFOLIO_OPTIMIZER_DAILY_PARQUET: Path = (
+    DATA_EVALUATE_DIR / "portfolio_optimizer_daily.parquet"
+)
+EVALUATE_PORTFOLIO_OPTIMIZER_SUMMARY_JSON: Path = (
+    DATA_EVALUATE_DIR / "portfolio_optimizer_summary.json"
 )

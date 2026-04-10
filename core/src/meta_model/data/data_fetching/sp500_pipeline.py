@@ -357,9 +357,15 @@ def _fetch_stooq_symbol(symbol: str, start_date: str, end_date: str) -> pd.DataF
     url = STOOQ_URL.format(symbol=symbol, d1=start_date.replace("-", ""), d2=end_date.replace("-", ""))
     response = requests.get(url, headers={"User-Agent": "prevision-sp500/0.1"}, timeout=30)
     response.raise_for_status()
-    if "No data" in response.text or len(response.text.strip().splitlines()) < 2:
+    payload: str = response.text.strip()
+    lines: list[str] = payload.splitlines()
+    if "No data" in payload or len(lines) < 2:
         return None
-    data: pd.DataFrame = pd.read_csv(io.StringIO(response.text), parse_dates=["Date"])
+    header_columns: list[str] = [column.strip() for column in lines[0].split(",")]
+    if "Date" not in header_columns:
+        LOGGER.debug("Stooq returned a non-CSV payload for %s", symbol)
+        return None
+    data: pd.DataFrame = pd.read_csv(io.StringIO(payload), parse_dates=["Date"])
     if data.empty or "Close" not in data.columns:
         return None
     data = data.sort_values("Date").set_index("Date")

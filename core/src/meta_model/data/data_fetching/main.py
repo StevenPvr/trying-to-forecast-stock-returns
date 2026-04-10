@@ -542,6 +542,36 @@ def _fill_missing_beta_from_market_returns(
     return enriched
 
 
+def _adjust_ohlc_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Multiply raw OHLC by adj_close/close to normalise splits and dividends.
+
+    After this step, open/high/low/close reflect split-adjusted levels so that
+    multi-day features (drawdown, breakout) are not distorted by corporate
+    actions.  Tiingo rows are already adjusted, so the ratio is ~1.0 for them
+    (idempotent).
+    """
+    if "adj_close" not in df.columns or "close" not in df.columns:
+        LOGGER.info("Skipping OHLC adjustment: adj_close or close column missing.")
+        return df
+
+    adjusted: pd.DataFrame = df.copy()
+    close_raw: pd.Series = pd.to_numeric(adjusted["close"], errors="coerce")  # type: ignore[type-arg]
+    adj_close_raw: pd.Series = pd.to_numeric(adjusted["adj_close"], errors="coerce")  # type: ignore[type-arg]
+    safe_close: pd.Series = close_raw.where(close_raw > 0)  # type: ignore[type-arg]
+    ratio: pd.Series = (adj_close_raw / safe_close).fillna(1.0)  # type: ignore[type-arg]
+
+    ohlc_columns: list[str] = [c for c in ("open", "high", "low", "close") if c in adjusted.columns]
+    for col in ohlc_columns:
+        adjusted[col] = pd.to_numeric(adjusted[col], errors="coerce") * ratio
+
+    adjusted_count: int = int((ratio - 1.0).abs().gt(1e-8).sum())
+    LOGGER.info(
+        "Adjusted OHLC prices for splits/dividends: %d/%d rows had ratio != 1.0.",
+        adjusted_count, len(adjusted),
+    )
+    return adjusted
+
+
 def _drop_unneeded_raw_price_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only raw OHLC columns; drop other raw price levels."""
     columns_to_drop: list[str] = [
@@ -731,6 +761,7 @@ def main() -> None:
     merged = _drop_leading_nan_rows(merged)
     merged = _transform_price_columns_to_log_returns(merged)
     merged = _fill_missing_beta_from_market_returns(merged)
+    merged = _adjust_ohlc_prices(merged)
     merged = _drop_unneeded_raw_price_columns(merged)
 
     # Filter to 2007 onwards

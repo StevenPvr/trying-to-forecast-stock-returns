@@ -56,8 +56,36 @@ def test_estimate_trade_cost_applies_fx_only_when_currency_differs() -> None:
         account_currency="EUR",
     )
 
-    assert foreign_estimate.fx_conversion_amount_eur == pytest.approx(50.0)
+    assert foreign_estimate.fx_conversion_amount_eur == pytest.approx(0.0)
     assert local_estimate.fx_conversion_amount_eur == pytest.approx(0.0)
+
+
+def test_estimate_trade_cost_is_zero_for_stock_cash_under_free_monthly_turnover() -> None:
+    estimate = estimate_trade_cost(
+        _build_spec(currency="USD"),
+        order_value_eur=10_000.0,
+        month_to_date_turnover_eur=0.0,
+        account_currency="EUR",
+    )
+
+    assert estimate.billable_turnover_eur == pytest.approx(0.0)
+    assert estimate.commission_amount_eur == pytest.approx(0.0)
+    assert estimate.fx_conversion_amount_eur == pytest.approx(0.0)
+    assert estimate.total_cost_amount_eur == pytest.approx(0.0)
+
+
+def test_estimate_trade_cost_applies_only_to_excess_turnover_above_free_tier() -> None:
+    estimate = estimate_trade_cost(
+        _build_spec(currency="USD"),
+        order_value_eur=50_000.0,
+        month_to_date_turnover_eur=80_000.0,
+        account_currency="EUR",
+    )
+
+    assert estimate.billable_turnover_eur == pytest.approx(30_000.0)
+    assert estimate.commission_amount_eur == pytest.approx(60.0)
+    assert estimate.fx_conversion_amount_eur == pytest.approx(150.0)
+    assert estimate.total_cost_amount_eur == pytest.approx(210.0)
 
 
 if __name__ == "__main__":

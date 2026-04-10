@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 import sys
 from pathlib import Path
@@ -24,15 +25,19 @@ from core.src.meta_model.broker_xtb.specs import (
 )
 from core.src.meta_model.broker_xtb.universe import build_tradable_universe, save_tradable_universe
 from core.src.meta_model.data.paths import (
+    PORTFOLIO_BEST_PARAMS_JSON,
+    PORTFOLIO_RISK_COVARIANCE_PARQUET,
     FEATURE_SELECTION_FILTERED_DATASET_PARQUET,
+    META_BEST_PARAMS_JSON,
+    META_MODEL_JSON,
     XGBOOST_OPTUNA_TRIALS_PARQUET,
 )
 from core.src.meta_model.evaluate.backtest import (
     ActiveTrade,
+    BacktestRuntimeConfig,
     BacktestState,
+    PortfolioOptimizerArtifacts,
     XtbCostConfig,
-    allocate_signal_candidates,
-    build_daily_signal_candidates,
     finalize_backtest_state,
     process_prediction_day,
 )
@@ -45,13 +50,34 @@ from core.src.meta_model.evaluate.dataset import (
 from core.src.meta_model.evaluate.io import save_evaluation_outputs
 from core.src.meta_model.evaluate.parameters import load_selected_xgboost_configuration
 from core.src.meta_model.model_registry.main import ModelSpec, build_default_model_specs
-from core.src.meta_model.model_contract import DATE_COLUMN
+from core.src.meta_model.model_contract import DATE_COLUMN, PREDICTION_COLUMN
+from core.src.meta_model.portfolio_optimization.alpha_calibration import (
+    FittedAlphaCalibrator,
+    deserialize_alpha_calibrator,
+)
 from core.src.meta_model.overfitting import build_overfitting_diagnostics, diagnostics_to_payload
 from core.src.meta_model.research_metrics import (
     build_daily_signal_diagnostics,
     summarize_daily_signal_diagnostics,
 )
 from core.src.meta_model.evaluate.training import iter_model_prediction_days
+from core.src.meta_model.evaluate.training import iter_model_prediction_days_frozen_train_only
+from core.src.meta_model.meta_labeling.calibration import (
+    FittedProbabilityCalibrator,
+    deserialize_probability_calibrator,
+)
+from core.src.meta_model.meta_labeling.features import (
+    META_PROBABILITY_COLUMN,
+    REFINED_EXPECTED_RETURN_COLUMN,
+    REFINED_PREDICTION_COLUMN,
+    attach_refined_signal_columns,
+    build_primary_context_columns,
+)
+from core.src.meta_model.meta_labeling.model import (
+    MetaModelArtifact,
+    deserialize_meta_model_artifact,
+    predict_meta_model,
+)
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -63,6 +89,8 @@ class ModelEvaluationResult:
     predictions: pd.DataFrame
     trades: pd.DataFrame
     daily: pd.DataFrame
+    allocations: pd.DataFrame
+    optimizer_daily: pd.DataFrame
     summary: dict[str, object]
 
 
@@ -75,6 +103,14 @@ class EvaluateRuntimeContext:
     unique_test_dates: pd.Index
     xtb_cost_config: XtbCostConfig
     xgboost_trials: pd.DataFrame
+    optimizer_artifacts: PortfolioOptimizerArtifacts | None
+    optimizer_params: dict[str, object]
+    optimizer_alpha_calibrator: FittedAlphaCalibrator | None
+    meta_artifact: MetaModelArtifact | None
+    meta_probability_calibrator: FittedProbabilityCalibrator | None
+    refinement_strategy: str
+    soft_shifted_floor: float
+    rank_blend_lambda: float
 
 
 def _float_payload(payload: dict[str, float]) -> dict[str, object]:
@@ -104,6 +140,101 @@ def _build_overfitting_report(
 
 def _summary_float(summary: dict[str, object], key: str) -> float:
     return float(np.asarray(summary[key], dtype=np.float64).item())
+
+
+def _mapping_float(
+    payload: Mapping[str, object],
+    key: str,
+    default: float,
+) -> float:
+    raw_value = payload.get(key, default)
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+    if isinstance(raw_value, (np.integer, np.floating)):
+        return float(raw_value.item())
+    if isinstance(raw_value, str):
+        try:
+            return float(raw_value)
+        except ValueError:
+            return default
+    return default
+
+
+def _build_backtest_runtime(
+    *,
+    context: EvaluateRuntimeContext,
+    config: BacktestConfig,
+    unique_dates: pd.Index,
+    cost_config_override: XtbCostConfig | None = None,
+) -> BacktestRuntimeConfig:
+    candidate_pool_value = context.optimizer_params.get(
+        "miqp_candidate_pool_size",
+        config.miqp_candidate_pool_size,
+    )
+    if isinstance(candidate_pool_value, (np.integer, np.floating)):
+        candidate_pool_size = int(candidate_pool_value.item())
+    elif isinstance(candidate_pool_value, (int, float)):
+        candidate_pool_size = int(candidate_pool_value)
+    else:
+        candidate_pool_size = int(config.miqp_candidate_pool_size)
+    return BacktestRuntimeConfig(
+        unique_dates=unique_dates,
+        top_fraction=config.top_fraction,
+        allocation_fraction=config.allocation_fraction,
+        action_cap_fraction=config.action_cap_fraction,
+        gross_cap_fraction=config.gross_cap_fraction,
+        adv_participation_limit=config.adv_participation_limit,
+        neutrality_mode=config.neutrality_mode,
+        open_hurdle_bps=config.open_hurdle_bps,
+        apply_prediction_hurdle=config.apply_prediction_hurdle,
+        hold_period_days=config.hold_period_days,
+        cost_config=cost_config_override or context.xtb_cost_config,
+        portfolio_construction_mode=config.portfolio_construction_mode,
+        optimizer_artifacts=context.optimizer_artifacts,
+        lambda_risk=_mapping_float(context.optimizer_params, "lambda_risk", config.lambda_risk),
+        lambda_turnover=_mapping_float(
+            context.optimizer_params,
+            "lambda_turnover",
+            config.lambda_turnover,
+        ),
+        lambda_cost=_mapping_float(context.optimizer_params, "lambda_cost", config.lambda_cost),
+        max_position_weight=_mapping_float(
+            context.optimizer_params,
+            "max_position_weight",
+            config.max_position_weight,
+        ),
+        max_sector_weight=_mapping_float(
+            context.optimizer_params,
+            "max_sector_weight",
+            config.max_sector_weight,
+        ),
+        min_target_weight=_mapping_float(
+            context.optimizer_params,
+            "min_target_weight",
+            config.min_target_weight,
+        ),
+        no_trade_buffer_bps=_mapping_float(
+            context.optimizer_params,
+            "no_trade_buffer_bps",
+            config.no_trade_buffer_bps,
+        ),
+        miqp_time_limit_seconds=_mapping_float(
+            context.optimizer_params,
+            "miqp_time_limit_seconds",
+            config.miqp_time_limit_seconds,
+        ),
+        miqp_relative_gap=_mapping_float(
+            context.optimizer_params,
+            "miqp_relative_gap",
+            config.miqp_relative_gap,
+        ),
+        miqp_candidate_pool_size=candidate_pool_size,
+        miqp_primary_objective_tolerance_bps=_mapping_float(
+            context.optimizer_params,
+            "miqp_primary_objective_tolerance_bps",
+            config.miqp_primary_objective_tolerance_bps,
+        ),
+    )
 
 
 def _build_model_leaderboard_row(
@@ -241,6 +372,34 @@ def _build_runtime_context(
         max_spread_bps=config.max_spread_bps,
     )
     save_tradable_universe(tradable_universe)
+    optimizer_artifacts: PortfolioOptimizerArtifacts | None = None
+    optimizer_params: dict[str, object] = {}
+    optimizer_alpha_calibrator: FittedAlphaCalibrator | None = None
+    meta_artifact: MetaModelArtifact | None = None
+    meta_probability_calibrator: FittedProbabilityCalibrator | None = None
+    if not PORTFOLIO_BEST_PARAMS_JSON.exists() or not PORTFOLIO_RISK_COVARIANCE_PARQUET.exists():
+        raise FileNotFoundError(
+            "optimizer_miqp mode requires portfolio artifacts. Missing portfolio_best_params.json or risk_covariance.parquet.",
+        )
+    optimizer_params = json.loads(PORTFOLIO_BEST_PARAMS_JSON.read_text(encoding="utf-8"))
+    calibrator_payload = optimizer_params.get("alpha_calibrator")
+    if isinstance(calibrator_payload, str) and calibrator_payload.strip():
+        optimizer_alpha_calibrator = deserialize_alpha_calibrator(calibrator_payload)
+    covariance = pd.read_parquet(PORTFOLIO_RISK_COVARIANCE_PARQUET)
+    if "index" in covariance.columns:
+        covariance = covariance.set_index("index")
+    optimizer_artifacts = PortfolioOptimizerArtifacts(covariance=pd.DataFrame(covariance))
+    if not META_BEST_PARAMS_JSON.exists() or not META_MODEL_JSON.exists():
+        raise FileNotFoundError(
+            "evaluate requires meta_labeling artifacts. Missing meta_best_params.json or meta_model.json.",
+        )
+    meta_best_params = json.loads(META_BEST_PARAMS_JSON.read_text(encoding="utf-8"))
+    meta_model_payload = json.loads(META_MODEL_JSON.read_text(encoding="utf-8"))
+    meta_artifact = deserialize_meta_model_artifact(meta_model_payload)
+    probability_payload = meta_best_params.get("meta_probability_calibrator")
+    if not isinstance(probability_payload, str) or not probability_payload.strip():
+        raise ValueError("meta_best_params.json must contain a serialized meta_probability_calibrator.")
+    meta_probability_calibrator = deserialize_probability_calibrator(probability_payload)
     return EvaluateRuntimeContext(
         dataset=dataset,
         feature_columns=feature_columns,
@@ -254,7 +413,41 @@ def _build_runtime_context(
             broker_spec_provider=spec_provider,
         ),
         xgboost_trials=_load_xgboost_trials(),
+        optimizer_artifacts=optimizer_artifacts,
+        optimizer_params=optimizer_params,
+        optimizer_alpha_calibrator=optimizer_alpha_calibrator,
+        meta_artifact=meta_artifact,
+        meta_probability_calibrator=meta_probability_calibrator,
+        refinement_strategy=str(meta_best_params.get("refinement_strategy", "binary_gate")),
+        soft_shifted_floor=float(meta_best_params.get("soft_shifted_floor", 0.45)),
+        rank_blend_lambda=float(meta_best_params.get("rank_blend_lambda", 0.50)),
     )
+
+
+def _apply_meta_refinement_to_prediction_day(
+    predicted_day: pd.DataFrame,
+    *,
+    meta_artifact: MetaModelArtifact,
+    meta_probability_calibrator: FittedProbabilityCalibrator,
+    refinement_strategy: str = "binary_gate",
+    soft_shifted_floor: float = 0.45,
+    rank_blend_lambda: float = 0.50,
+) -> pd.DataFrame:
+    enriched = build_primary_context_columns(predicted_day)
+    meta_probability = predict_meta_model(meta_artifact, enriched)
+    enriched[META_PROBABILITY_COLUMN] = meta_probability_calibrator.transform(
+        np.asarray(meta_probability, dtype=np.float64),
+    )
+    enriched = attach_refined_signal_columns(
+        enriched,
+        strategy=refinement_strategy,
+        soft_shifted_floor=soft_shifted_floor,
+        rank_blend_lambda=rank_blend_lambda,
+    )
+    enriched[PREDICTION_COLUMN] = enriched[REFINED_PREDICTION_COLUMN]
+    if REFINED_EXPECTED_RETURN_COLUMN in enriched.columns:
+        enriched["expected_return_5d"] = enriched[REFINED_EXPECTED_RETURN_COLUMN]
+    return enriched
 
 
 def _build_overfitting_diagnostics_payload(
@@ -295,34 +488,52 @@ def _evaluate_single_model(
         cash_balance=config.starting_cash_eur,
     )
     prediction_parts: list[pd.DataFrame] = []
-    for predicted_day in iter_model_prediction_days(
-        context.dataset,
-        context.feature_columns,
-        model_spec,
-        hold_period_days=config.hold_period_days,
-        execution_lag_days=config.execution_lag_days,
-        logger=LOGGER,
-    ):
-        prediction_parts.append(predicted_day)
-        process_prediction_day(
-            state=state,
-            daily_predictions=predicted_day,
-            unique_dates=context.unique_test_dates,
-            top_fraction=config.top_fraction,
-            allocation_fraction=config.allocation_fraction,
-            action_cap_fraction=config.action_cap_fraction,
-            gross_cap_fraction=config.gross_cap_fraction,
-            adv_participation_limit=config.adv_participation_limit,
-            neutrality_mode=config.neutrality_mode,
-            open_hurdle_bps=config.open_hurdle_bps,
-            apply_prediction_hurdle=config.apply_prediction_hurdle,
-            hold_period_days=config.hold_period_days,
-            cost_config=context.xtb_cost_config,
+    runtime = _build_backtest_runtime(
+        context=context,
+        config=config,
+        unique_dates=context.unique_test_dates,
+    )
+    if config.evaluation_training_mode == "frozen_train_only":
+        prediction_day_iter = iter_model_prediction_days_frozen_train_only(
+            context.dataset,
+            context.feature_columns,
+            model_spec,
+            execution_lag_days=config.execution_lag_days,
             logger=LOGGER,
         )
+    else:
+        prediction_day_iter = iter_model_prediction_days(
+            context.dataset,
+            context.feature_columns,
+            model_spec,
+            hold_period_days=config.hold_period_days,
+            execution_lag_days=config.execution_lag_days,
+            logger=LOGGER,
+        )
+    for predicted_day in prediction_day_iter:
+        predicted_day = build_primary_context_columns(predicted_day)
+        if context.optimizer_alpha_calibrator is not None:
+            expected = context.optimizer_alpha_calibrator.transform(
+                pd.to_numeric(predicted_day["prediction"], errors="coerce").to_numpy(dtype=np.float64),
+            )
+            predicted_day = pd.DataFrame(predicted_day.copy())
+            predicted_day["expected_return_5d"] = expected
+        if context.meta_artifact is not None and context.meta_probability_calibrator is not None:
+            predicted_day = _apply_meta_refinement_to_prediction_day(
+                predicted_day,
+                meta_artifact=context.meta_artifact,
+                meta_probability_calibrator=context.meta_probability_calibrator,
+                refinement_strategy=context.refinement_strategy,
+                soft_shifted_floor=context.soft_shifted_floor,
+                rank_blend_lambda=context.rank_blend_lambda,
+            )
+        prediction_parts.append(predicted_day)
+        process_prediction_day(state, predicted_day, runtime, logger=LOGGER)
     predictions = pd.concat(prediction_parts, ignore_index=True)
     predictions["model_name"] = model_spec.model_name
     trades, daily, backtest_summary = finalize_backtest_state(state)
+    allocations = pd.DataFrame(state.allocation_rows)
+    optimizer_daily = pd.DataFrame(state.optimizer_daily_rows)
     if not trades.empty:
         trades["model_name"] = model_spec.model_name
     if not daily.empty:
@@ -347,6 +558,8 @@ def _evaluate_single_model(
         predictions=predictions,
         trades=trades,
         daily=daily,
+        allocations=allocations,
+        optimizer_daily=optimizer_daily,
         summary=summary_row,
     )
 
@@ -375,6 +588,7 @@ def _evaluate_models(
 def _build_manual_trades(
     selected_result: ModelEvaluationResult,
     *,
+    context: EvaluateRuntimeContext,
     config: BacktestConfig,
     xtb_cost_config: XtbCostConfig,
 ) -> list[ActiveTrade]:
@@ -383,31 +597,19 @@ def _build_manual_trades(
     latest_predictions = pd.DataFrame(
         selected_predictions.loc[selected_predictions[DATE_COLUMN] == latest_prediction_date].copy(),
     )
-    manual_candidates = build_daily_signal_candidates(
-        latest_predictions,
-        top_fraction=config.top_fraction,
-        cost_config=xtb_cost_config,
-        expected_holding_days=config.hold_period_days,
-        neutrality_mode=config.neutrality_mode,
-    )
-    return allocate_signal_candidates(
-        trade_date=latest_prediction_date,
-        candidates=manual_candidates,
-        active_trades=[],
+    active_state = BacktestState(
+        initial_equity=_summary_float(selected_result.summary, "final_equity"),
         current_equity=_summary_float(selected_result.summary, "final_equity"),
         cash_balance=_summary_float(selected_result.summary, "final_equity"),
-        hold_period_days=config.hold_period_days,
-        allocation_fraction=config.allocation_fraction,
-        action_cap_fraction=config.action_cap_fraction,
-        gross_cap_fraction=config.gross_cap_fraction,
-        adv_participation_limit=config.adv_participation_limit,
-        neutrality_mode=config.neutrality_mode,
-        open_hurdle_bps=config.open_hurdle_bps,
-        apply_prediction_hurdle=config.apply_prediction_hurdle,
-        unique_dates=pd.Index([latest_prediction_date]),
-        month_to_date_turnover_eur=0.0,
-        account_currency=xtb_cost_config.account_currency,
     )
+    runtime = _build_backtest_runtime(
+        context=context,
+        config=config,
+        unique_dates=pd.Index([latest_prediction_date]),
+        cost_config_override=xtb_cost_config,
+    )
+    process_prediction_day(active_state, latest_predictions, runtime)
+    return list(active_state.active_trades)
 
 
 def _build_pipeline_summary(
@@ -448,6 +650,7 @@ def run_evaluate_pipeline(
     )
     manual_trades = _build_manual_trades(
         selected_result,
+        context=context,
         config=config,
         xtb_cost_config=context.xtb_cost_config,
     )
@@ -465,6 +668,13 @@ def run_evaluate_pipeline(
         summary,
         leaderboard=leaderboard,
         overfitting_report=overfitting_report,
+        portfolio_target_allocations=selected_result.allocations,
+        portfolio_optimizer_daily=selected_result.optimizer_daily,
+        portfolio_optimizer_summary={
+            "selected_model_name": promoted_model_name,
+            "row_count_allocations": int(len(selected_result.allocations)),
+            "row_count_optimizer_daily": int(len(selected_result.optimizer_daily)),
+        },
     )
     LOGGER.info(
         "Evaluate pipeline completed: selected_model=%s | trades=%d | final_equity=%.6f | total_return=%.6f | sharpe=%.6f",

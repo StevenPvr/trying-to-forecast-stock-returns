@@ -21,6 +21,7 @@ from core.src.meta_model.data.data_fetching.macro_pipeline import (
     _fetch_series_with_semaphore,
     _fetch_single_series,
     _resolve_api_key,
+    _series_max_staleness_sessions,
     build_macro_dataset,
 )
 from core.src.meta_model.data.paths import DATA_FETCHING_DIR
@@ -306,6 +307,77 @@ class TestBuildMacroDataframe:
         assert "date" in result.columns
         sessions: pd.DatetimeIndex = get_nyse_sessions("2020-01-06", "2020-01-10")
         assert len(result) == len(sessions)
+
+
+# ---------------------------------------------------------------------------
+# build_macro_dataset
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _series_max_staleness_sessions
+# ---------------------------------------------------------------------------
+
+
+class TestSeriesMaxStaleness:
+    def test_daily_series(self) -> None:
+        assert _series_max_staleness_sessions("DGS10") == 5
+
+    def test_weekly_series(self) -> None:
+        assert _series_max_staleness_sessions("WALCL") == 15
+
+    def test_monthly_series(self) -> None:
+        assert _series_max_staleness_sessions("CPIAUCSL") == 45
+
+    def test_quarterly_series(self) -> None:
+        assert _series_max_staleness_sessions("GDPC1") == 130
+
+    def test_unknown_defaults_to_daily(self) -> None:
+        assert _series_max_staleness_sessions("UNKNOWN_SERIES") == 5
+
+
+# ---------------------------------------------------------------------------
+# _build_macro_dataframe -- staleness limit
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMacroDataframeStaleness:
+    def test_ffill_respects_daily_staleness_limit(self) -> None:
+        """A daily series with data only on day 1 should NaN out after 5 sessions."""
+        sessions: pd.DatetimeIndex = get_nyse_sessions("2020-01-02", "2020-01-31")
+        first_session: pd.Timestamp = sessions[0]
+        series: pd.Series = pd.Series(  # type: ignore[type-arg]
+            [42.0], index=pd.DatetimeIndex([first_session]),
+        )
+        result: pd.DataFrame = _build_macro_dataframe(
+            {"DGS10": series}, "2020-01-02", "2020-01-31",
+        )
+        col: pd.Series = result["dgs10"]  # type: ignore[type-arg]
+        # First value is NaN (lag=1 shifts the observation forward by 1 session)
+        # Then the value appears and is forward-filled for at most 5 sessions
+        non_null_count: int = int(col.notna().sum())
+        assert non_null_count <= 6  # 1 shifted observation + up to 5 ffill sessions
+
+    def test_ffill_respects_quarterly_staleness_limit(self) -> None:
+        """A quarterly series (lag=66) should ffill longer than a daily one (lag=1).
+
+        Uses a long date range so the 66-session quarterly lag still leaves room
+        for the shifted observation and its forward-fill to appear.
+        """
+        sessions: pd.DatetimeIndex = get_nyse_sessions("2020-01-02", "2020-12-31")
+        first_session: pd.Timestamp = sessions[0]
+        series: pd.Series = pd.Series(  # type: ignore[type-arg]
+            [99.0], index=pd.DatetimeIndex([first_session]),
+        )
+        result_daily: pd.DataFrame = _build_macro_dataframe(
+            {"DGS10": series}, "2020-01-02", "2020-12-31",
+        )
+        result_quarterly: pd.DataFrame = _build_macro_dataframe(
+            {"GDPC1": series}, "2020-01-02", "2020-12-31",
+        )
+        daily_non_null: int = int(result_daily["dgs10"].notna().sum())
+        quarterly_non_null: int = int(result_quarterly["gdpc1"].notna().sum())
+        assert quarterly_non_null > daily_non_null
 
 
 # ---------------------------------------------------------------------------

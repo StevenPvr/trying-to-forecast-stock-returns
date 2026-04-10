@@ -462,6 +462,19 @@ class TestFeatureLags:
             assert str(lagged_small[column].dtype) == str(lagged_large[column].dtype)
 
 
+    def test_rejects_multi_ticker_input(self) -> None:
+        dates = pd.date_range("2020-01-01", periods=4, freq="D")
+        multi_ticker = pd.DataFrame({
+            "date": list(dates) * 2,
+            "ticker": ["AAA"] * 4 + ["BBB"] * 4,
+            "quant_trend_slope_21d": [0.01] * 8,
+            "stock_open_log_return": [0.01] * 8,
+        })
+
+        with pytest.raises(ValueError, match="single-ticker input"):
+            build_lagged_feature_group(multi_ticker)
+
+
 class TestMain:
     def test_full_flow(self, tmp_path: Path) -> None:
         input_path: Path = tmp_path / "cleaned.parquet"

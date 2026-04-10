@@ -171,6 +171,7 @@ def run_feature_selection(
         linear_pruning_audit=selection_result.linear_pruning_audit,
         distance_correlation_audit=selection_result.distance_correlation_audit,
         target_correlation_audit=selection_result.target_correlation_audit,
+        wrapper_search_history=selection_result.wrapper_search_history,
         summary=selection_result.summary,
     )
     selected_frame = pd.DataFrame(

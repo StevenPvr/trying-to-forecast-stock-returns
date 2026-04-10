@@ -148,6 +148,15 @@ FRED_QUARTERLY_SERIES: tuple[str, ...] = (
 )
 FRED_RATE_LIMIT_SLEEP: float = 0.5
 
+# --- Macro staleness limits (max forward-fill sessions per frequency) ---
+# Conservative: ~2x the natural publication gap to tolerate delayed releases
+# while still capping indefinite propagation of discontinued series.
+
+FRED_DAILY_MAX_STALENESS_SESSIONS: int = 5
+FRED_WEEKLY_MAX_STALENESS_SESSIONS: int = 15
+FRED_MONTHLY_MAX_STALENESS_SESSIONS: int = 45
+FRED_QUARTERLY_MAX_STALENESS_SESSIONS: int = 130
+
 # --- Cross-Asset ---
 
 CROSS_ASSET_INDICES: tuple[str, ...] = (
